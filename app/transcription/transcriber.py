@@ -58,11 +58,17 @@ class VideoTranscriber:
         language: str = "en",
         beam_size: int = 5,
         word_timestamps: bool = True,
+        condition_on_previous_text: bool = True,
     ) -> TranscriptResult:
         """Transcribe ``video_path`` and return a JSON-friendly result.
 
         ``word_timestamps`` is on by default so downstream fluency analysis
         (pauses, speaking rate, mean length of run) has per-word timing.
+
+        ``condition_on_previous_text`` can be set to ``False`` for short,
+        self-contained answers: it stops the decoder from feeding each window's
+        text into the next, which avoids the repetition/early-cutoff failures
+        that otherwise truncate longer recordings mid-sentence.
         """
         path = Path(video_path)
         if not path.exists():
@@ -74,6 +80,7 @@ class VideoTranscriber:
             language=language,
             beam_size=beam_size,
             word_timestamps=word_timestamps,
+            condition_on_previous_text=condition_on_previous_text,
         )
 
         segments = [

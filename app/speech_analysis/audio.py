@@ -64,3 +64,25 @@ def decode_audio_mono(
         return np.zeros(0, dtype=np.float32), target_sr
 
     return np.concatenate(chunks).astype(np.float32), target_sr
+
+
+def write_wav_mono(samples: np.ndarray, sample_rate: int, path: str) -> str:
+    """Write a mono float waveform to a 16-bit PCM WAV file.
+
+    Browser ``MediaRecorder`` produces non-seekable WebM blobs with no reliable
+    duration header, which can truncate downstream transcription. Re-encoding
+    the fully decoded waveform to a proper WAV gives the transcriber a seekable
+    file with a correct duration.
+    """
+    import wave
+
+    clipped = np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0)
+    pcm = (clipped * 32767.0).astype("<i2")
+
+    with wave.open(path, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(int(sample_rate))
+        wav_file.writeframes(pcm.tobytes())
+
+    return path

@@ -18,6 +18,39 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+## Web App (Candidly)
+
+A web frontend that wraps the interview-agent logic. Phase 1 (MVP) covers
+Resume setup, Interview profiles, and Practice mode (question generation,
+text/recorded answers, AI Coach panel, answer scoring, and an end-of-session
+report).
+
+Backend (FastAPI), from the repo root:
+
+```bash
+./.venv/bin/python -m pip install -r requirements.txt
+PYTHONPATH=. ./.venv/bin/uvicorn app.api.main:app --reload --port 8000
+```
+
+The API is documented at http://localhost:8000/docs. It uses the same Ollama
+configuration as the CLI (`.env`), and reads/writes the same `data/` layout
+(resumes in `data/resumes/llm/`, profiles in `data/profiles/`, practice history
+in `data/practice_runs/`).
+
+Frontend (Vite + React), in a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:5173 (the dev server proxies `/api` to the backend on
+port 8000). Typical flow: **Resume** → upload & edit a resume → **Profiles** →
+create a profile (job description + resume version) → **Practice** → answer the
+generated questions (type or record), toggle **Show AI Coach** for suggested
+bullets and an AI sample answer.
+
 ## Run
 
 Parse a resume PDF:

@@ -12,8 +12,15 @@ data/questions/
 data/evaluations/
 runtime_uploads/
 data/interview_runs/
+data/profiles/
+data/practice_runs/
+data/uploads/
 db/*.db
 db/*.sqlite
 db/*.sqlite3
 
 src/
+
+# frontend
+frontend/node_modules/
+frontend/dist/
