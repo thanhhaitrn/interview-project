@@ -105,6 +105,33 @@ class QuestionLegacyCompatibility(BaseModel):
     expected_good_answer_points: list[str]
 
 
+class DocumentBriefOutput(BaseModel):
+    candidate_summary: str = Field(
+        default="",
+        description="Compact summary of the candidate profile and relevant background.",
+    )
+    role_summary: str = Field(
+        default="",
+        description="Compact summary of the target role and hiring context.",
+    )
+    key_resume_evidence: list[str] = Field(
+        default_factory=list,
+        description="Most relevant resume evidence to use during evaluation.",
+    )
+    key_job_requirements: list[str] = Field(
+        default_factory=list,
+        description="Most important job requirements to use during evaluation.",
+    )
+    role_alignment_notes: list[str] = Field(
+        default_factory=list,
+        description="Concise notes linking resume evidence to job needs.",
+    )
+    fairness_notes: list[str] = Field(
+        default_factory=list,
+        description="Relevant fairness or evidence-boundary notes.",
+    )
+
+
 class GeneratedQuestionOutput(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -112,6 +139,7 @@ class GeneratedQuestionOutput(BaseModel):
     seniority_level: str | None = None
     difficulty_level: str | None = None
     question_count: int = 0
+    document_brief: DocumentBriefOutput | None = None
     questions: list[InterviewQuestionOutput] = Field(default_factory=list)
     coverage_summary: QuestionCoverageSummary | None = None
     legacy_compatibility: QuestionLegacyCompatibility | None = None

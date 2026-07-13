@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Any, TypeVar
@@ -226,16 +227,21 @@ def _is_retryable_error(exc: Exception) -> bool:
 
 def get_ollama_chat_model(
     settings: dict[str, str] | None = None,
+    response_format: str | dict[str, Any] | None = None,
     temperature: float | None = None,
 ) -> ChatOllama:
     """Create a LangChain Ollama chat model for structured-output calls."""
     settings = settings or get_model_settings()
     client_kwargs: dict[str, Any] = {"timeout": get_request_timeout()}
+    model_kwargs: dict[str, Any] = {}
 
     if settings["api_key"]:
         client_kwargs["headers"] = {
             "Authorization": f"Bearer {settings['api_key']}"
         }
+
+    if response_format is not None:
+        model_kwargs["format"] = response_format
 
     return ChatOllama(
         model=settings["model_name"],
@@ -244,7 +250,101 @@ def get_ollama_chat_model(
             temperature if temperature is not None else get_model_temperature()
         ),
         client_kwargs=client_kwargs,
+        **model_kwargs,
     )
+
+
+def _message_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or item))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+
+    return str(content)
+
+
+def _load_json_value(text: str) -> Any:
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError("Model returned an empty response.")
+
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        preview = stripped[:500]
+        raise ValueError(
+            "Model response must be exactly one JSON value with no markdown, "
+            f"code fences, or extra text: {preview}"
+        ) from exc
+
+
+def _build_json_retry_prompt(
+    *,
+    prompt_text: str,
+    schema: type[StructuredOutput],
+    primary_error: str,
+) -> str:
+    schema_json = json.dumps(
+        schema.model_json_schema(),
+        ensure_ascii=False,
+        indent=2,
+    )
+    return (
+        "The previous model response could not be parsed as JSON.\n"
+        f"Parser error: {primary_error}\n\n"
+        "Retry the same task and return exactly one JSON value that validates "
+        f"against this Pydantic schema: {schema.__name__}.\n"
+        "Do not include markdown, code fences, commentary, or blank output.\n\n"
+        f"JSON schema:\n{schema_json}\n\n"
+        f"Original prompt:\n{prompt_text}"
+    )
+
+
+def _call_json_mode_retry(
+    *,
+    prompt_text: str,
+    schema: type[StructuredOutput],
+    settings: dict[str, str],
+    primary_error: str,
+) -> tuple[StructuredOutput, str, str, str, _UsageCaptureHandler]:
+    retry_prompt = _build_json_retry_prompt(
+        prompt_text=prompt_text,
+        schema=schema,
+        primary_error=primary_error,
+    )
+    fallback_errors = []
+
+    for response_format in (schema.model_json_schema(), "json"):
+        usage_handler = _UsageCaptureHandler()
+        try:
+            llm = get_ollama_chat_model(
+                settings,
+                response_format=response_format,
+            )
+            message = llm.invoke(
+                retry_prompt,
+                config={"callbacks": [usage_handler]},
+            )
+            raw_text = _message_content_to_text(getattr(message, "content", message))
+            parsed_json = _load_json_value(raw_text)
+            parsed_result = schema.model_validate(parsed_json)
+            format_name = (
+                "json_schema"
+                if isinstance(response_format, dict)
+                else str(response_format)
+            )
+            return parsed_result, raw_text, retry_prompt, format_name, usage_handler
+        except Exception as exc:
+            fallback_errors.append(str(exc))
+
+    raise RuntimeError("; ".join(fallback_errors))
 
 
 def call_llm_with_structured_output(
@@ -260,19 +360,28 @@ def call_llm_with_structured_output(
     the env default for this call (use 0 for deterministic scoring).
     """
     prompt_text = _prompt_to_text(prompt)
+    trace_prompt_text = prompt_text
     output_text = ""
     settings: dict[str, str] = {}
     started = time.perf_counter()
     status = "ok"
     error = ""
+    primary_error = ""
+    fallback_used = False
+    fallback_format = ""
+    fallback_raw_chars = 0
     retry_limit = get_max_retries() if max_retries is None else max(0, max_retries)
     attempts = 0
     usage_handler = _UsageCaptureHandler()
+    trace_usage_handler = usage_handler
 
     try:
         settings = get_model_settings()
         llm = get_ollama_chat_model(settings, temperature=temperature)
-        structured_llm = llm.with_structured_output(schema)
+        structured_llm = llm.with_structured_output(
+            schema,
+            method="json_schema",
+        )
 
         last_error: Exception | None = None
         for attempt in range(retry_limit + 1):
@@ -300,41 +409,72 @@ def call_llm_with_structured_output(
         assert last_error is not None
         raise last_error
     except Exception as exc:
-        status = "error"
-        error = str(exc)
-        raise
+        primary_error = str(exc)
+        try:
+            (
+                retry_result,
+                raw_retry_text,
+                retry_prompt,
+                fallback_format,
+                retry_usage_handler,
+            ) = _call_json_mode_retry(
+                prompt_text=prompt_text,
+                schema=schema,
+                settings=settings,
+                primary_error=primary_error,
+            )
+            fallback_used = True
+            fallback_raw_chars = len(raw_retry_text)
+            trace_prompt_text = retry_prompt
+            trace_usage_handler = retry_usage_handler
+            output_text = retry_result.model_dump_json(exclude_none=True)
+            return retry_result
+        except Exception as fallback_exc:
+            status = "error"
+            error = (
+                "Structured output failed. "
+                f"Primary parser error: {primary_error}. "
+                f"JSON retry error: {fallback_exc}"
+            )
+            raise RuntimeError(error) from fallback_exc
     finally:
         runtime_seconds = time.perf_counter() - started
         token_counts = _resolve_token_counts(
-            prompt_text=prompt_text,
+            prompt_text=trace_prompt_text,
             output_text=output_text,
-            usage_metadata=usage_handler.usage_metadata,
-            response_metadata=usage_handler.response_metadata,
+            usage_metadata=trace_usage_handler.usage_metadata,
+            response_metadata=trace_usage_handler.response_metadata,
         )
         trace_item = {
             "schema": schema.__name__,
             "model": settings.get("model_name", ""),
             "base_url": settings.get("base_url", ""),
             "status": status,
+            "structured_output_method": "json_schema",
             "attempts": attempts,
             "runtime_seconds": round(runtime_seconds, 4),
-            "prompt_chars": len(prompt_text),
+            "prompt_chars": len(trace_prompt_text),
             "completion_chars": len(output_text),
             "prompt_tokens": token_counts["prompt_tokens"],
             "completion_tokens": token_counts["completion_tokens"],
             "total_tokens": token_counts["total_tokens"],
             "token_source": token_counts["token_source"],
         }
+        if fallback_used:
+            trace_item["fallback_used"] = True
+            trace_item["fallback_format"] = fallback_format
+            trace_item["fallback_raw_chars"] = fallback_raw_chars
+            trace_item["primary_error"] = primary_error
         if token_counts["token_source"] == "estimated_chars_div_4":
             trace_item["prompt_tokens_estimate"] = token_counts["prompt_tokens"]
             trace_item["completion_tokens_estimate"] = token_counts[
                 "completion_tokens"
             ]
             trace_item["total_tokens_estimate"] = token_counts["total_tokens"]
-        if usage_handler.usage_metadata:
-            trace_item["usage_metadata"] = usage_handler.usage_metadata
-        if usage_handler.response_metadata:
-            trace_item["response_metadata"] = usage_handler.response_metadata
+        if trace_usage_handler.usage_metadata:
+            trace_item["usage_metadata"] = trace_usage_handler.usage_metadata
+        if trace_usage_handler.response_metadata:
+            trace_item["response_metadata"] = trace_usage_handler.response_metadata
         if error:
             trace_item["error"] = error
 

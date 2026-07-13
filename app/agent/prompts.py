@@ -22,6 +22,7 @@ _PROMPT_SECTIONS: list[PromptSection] = [
     ("system", "{system_instruction}", "system_instruction", True),
     ("system", "Resume JSON:\n{resume_json}", "resume_json", False),
     ("system", "Job description JSON:\n{job_description_json}", "job_description_json", False),
+    ("system", "Document brief JSON:\n{document_brief_json}", "document_brief_json", False),
     ("system", "Interview config JSON:\n{interview_config_json}", "interview_config_json", False),
     ("system", "Evaluation config JSON:\n{evaluation_config_json}", "evaluation_config_json", False),
     ("system", "Rubric JSON:\n{rubric_json}", "rubric_json", False),
@@ -39,6 +40,13 @@ _PROMPT_SECTIONS: list[PromptSection] = [
 ]
 
 _EMPTY_TEXT_MARKERS = {"", "{}", "[]", "null", '""', "no context provided."}
+
+TECHNIQUE_GUIDANCE = {
+    "project_deep_dive": "Deeply examine a real project or experience from the resume.",
+    "technical_probe": "Probe a specific implementation detail, tool, concept, or technical tradeoff.",
+    "situational": "Use a realistic job-related scenario to test applied judgment.",
+    "behavioral_star": "Ask for past behavior using the Situation, Task, Action, Result structure.",
+}
 
 NON_EMPTY_OUTPUT_RULE = (
     "Do not leave output fields blank. Every included string must contain a "
@@ -58,6 +66,14 @@ QUESTION_SYSTEM_INSTRUCTION = (
     "Do not pre-generate follow-up questions in the interview plan; omit "
     "\"follow_up_questions\" because follow-ups must be generated only after "
     "reviewing the candidate answer and evaluation. "
+    "Prefer balanced coverage across the configured question techniques; when "
+    "question_count is sufficient, try to use each configured technique at least "
+    "once, but do not force a technique that is not supported by the resume or "
+    "job description evidence. In coverage_summary, state which techniques were "
+    "used and briefly explain any configured technique that was skipped. "
+    "Also create a compact document_brief that preserves the most important "
+    "candidate evidence, role requirements, alignment notes, and fairness "
+    "boundaries needed for later evaluation and follow-up decisions. "
     "Include \"expected_strong_answer_signals\", \"red_flags\", "
     "\"reason_for_asking\", \"resume_grounding\", and \"job_alignment\"."
 )
@@ -73,8 +89,10 @@ EVALUATION_SYSTEM_INSTRUCTION = (
     "missing skills. "
     "When delivery metrics JSON is provided (speaking rate, pauses/hesitation, "
     "filler words, repetitions, mean length of run, and voice steadiness such "
-    "as jitter, shimmer, pitch variability, plus any face metrics), factor them "
-    "into the Communication Clarity criterion and populate delivery_assessment. "
+    "as jitter, shimmer, pitch variability, plus video presentation metrics "
+    "such as face visibility, centered framing, brightness, blur, head movement, "
+    "multiple faces, and optional happy/emotion availability), factor them into "
+    "the Communication Clarity criterion and populate delivery_assessment. "
     "Treat delivery metrics as supporting signals about how the answer was "
     "delivered, not as the sole basis for the score, and never penalize accent, "
     "non-native pronunciation, or protected characteristics."
@@ -86,7 +104,11 @@ TURN_DECISION_SYSTEM_INSTRUCTION = (
     "Always include a non-empty reason explaining the selected action. Generate a "
     "follow_up_question only after reviewing the current candidate answer and "
     "latest evaluation. When action is follow_up, return exactly one concise "
-    "follow_up_question. Never return multiple follow-up questions."
+    "follow_up_question. The follow-up must be one integrated question that covers "
+    "the most important missing evidence from the latest evaluation; do not split "
+    "it into multiple independent questions, a numbered list, or multiple question "
+    "marks. You may use one main question with an \"include X, Y, and Z\" phrase "
+    "to cover the key gaps. Never return multiple follow-up questions."
 )
 
 FINAL_REPORT_SYSTEM_INSTRUCTION = (
@@ -225,6 +247,8 @@ def _question_config_payload(
                 1,
             ),
         },
+        "technique_guidance": TECHNIQUE_GUIDANCE,
+        "technique_coverage_policy": "prefer_balanced_coverage",
         "missing_value_policy": (
             "If seniority_level or difficulty_level is null, infer it from the "
             "job description and resume instead of assuming a default."
@@ -286,6 +310,7 @@ def build_evaluation_chat_prompt(
     expected_good_answer_points: list[str],
     student_answer: str,
     profile: AgentProfile,
+    document_brief: Any = None,
     delivery_metrics: dict[str, Any] | None = None,
 ) -> ChatPromptValue:
     question_payload = (
@@ -299,6 +324,7 @@ def build_evaluation_chat_prompt(
         ),
         "resume_json": format_context(cv_context),
         "job_description_json": format_context(job_description_context),
+        "document_brief_json": format_context(document_brief),
         "evaluation_config_json": format_json(_evaluation_config_payload(profile)),
         "rubric_json": format_json(_rubric_payload(profile)),
         "rating_anchors_json": format_json(_rating_anchors_payload(profile)),
@@ -314,6 +340,7 @@ def build_evaluation_chat_prompt(
 def build_turn_decision_chat_prompt(
     *,
     profile: AgentProfile,
+    document_brief: Any = None,
     current_question: dict[str, Any],
     current_answer: str,
     latest_evaluation: dict[str, Any],
@@ -330,6 +357,7 @@ def build_turn_decision_chat_prompt(
             f"{_profile_value(profile, 'system_instruction')}\n"
             f"{TURN_DECISION_SYSTEM_INSTRUCTION}"
         ),
+        "document_brief_json": format_context(document_brief),
         "interview_limits_json": format_json(
             {
                 "current_question_index": current_question_index,
@@ -340,7 +368,10 @@ def build_turn_decision_chat_prompt(
                 "followup_generation_rule": (
                     "Follow-up questions are generated only at this decision "
                     "step after reviewing the candidate answer and evaluation. "
-                    "If action is follow_up, return exactly one follow_up_question."
+                    "If action is follow_up, return exactly one integrated "
+                    "follow_up_question that covers the most important missing "
+                    "evidence. Do not return multiple independent questions, "
+                    "a numbered list, or multiple question marks."
                 ),
             }
         ),
@@ -351,7 +382,7 @@ def build_turn_decision_chat_prompt(
         "task": (
             "Select follow_up only when more evidence is needed and follow-up "
             "budget remains. If selecting follow_up, generate exactly one "
-            "answer-aware follow_up_question now; otherwise select "
+            "answer-aware, integrated follow_up_question now; otherwise select "
             "next_question or final_report."
         ),
     }
@@ -363,6 +394,7 @@ def build_final_report_chat_prompt(
     profile: AgentProfile,
     interview_plan: dict[str, Any],
     turns: list[dict[str, Any]],
+    document_brief: Any = None,
 ) -> ChatPromptValue:
     payload = {
         "role": _profile_value(profile, "role"),
@@ -370,6 +402,7 @@ def build_final_report_chat_prompt(
             f"{_profile_value(profile, 'system_instruction')}\n"
             f"{FINAL_REPORT_SYSTEM_INSTRUCTION}"
         ),
+        "document_brief_json": format_context(document_brief),
         "interview_plan_json": format_json(interview_plan),
         "turns_json": format_json(turns),
         "task": "Summarize the completed interview with strengths, risks, evidence, and next steps.",
@@ -400,6 +433,7 @@ def build_evaluation_prompt(
     expected_good_answer_points: list[str],
     student_answer: str,
     profile: AgentProfile,
+    document_brief: Any = None,
     delivery_metrics: dict[str, Any] | None = None,
 ) -> str:
     return build_evaluation_chat_prompt(
@@ -409,6 +443,7 @@ def build_evaluation_prompt(
         expected_good_answer_points=expected_good_answer_points,
         student_answer=student_answer,
         profile=profile,
+        document_brief=document_brief,
         delivery_metrics=delivery_metrics,
     ).to_string()
 
@@ -429,11 +464,13 @@ EVALUATION_PROMPT_TEMPLATE = build_prompt_template(
         "system_instruction": EVALUATION_SYSTEM_INSTRUCTION,
         "resume_json": "content",
         "job_description_json": "content",
+        "document_brief_json": "content",
         "evaluation_config_json": "content",
         "rubric_json": "content",
         "rating_anchors_json": "content",
         "question_json": "content",
         "candidate_answer": "answer",
+        "delivery_metrics_json": "content",
         "task": "task",
     }
 )
@@ -441,6 +478,7 @@ TURN_DECISION_PROMPT_TEMPLATE = build_prompt_template(
     {
         "role": "role",
         "system_instruction": TURN_DECISION_SYSTEM_INSTRUCTION,
+        "document_brief_json": "content",
         "interview_limits_json": "content",
         "current_question_json": "content",
         "latest_evaluation_json": "content",
@@ -452,6 +490,7 @@ FINAL_REPORT_PROMPT_TEMPLATE = build_prompt_template(
     {
         "role": "role",
         "system_instruction": FINAL_REPORT_SYSTEM_INSTRUCTION,
+        "document_brief_json": "content",
         "interview_plan_json": "content",
         "turns_json": "content",
         "task": "task",

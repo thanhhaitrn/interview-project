@@ -71,6 +71,167 @@ def _short_text(value: Any, max_chars: int = 220) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+def _append_unique_text(
+    values: list[str],
+    value: Any,
+    *,
+    max_items: int,
+    max_chars: int = 260,
+) -> None:
+    if len(values) >= max_items:
+        return
+
+    text = _short_text(value, max_chars=max_chars)
+    if not text:
+        return
+
+    dedupe_key = text.lower()
+    if dedupe_key in {item.lower() for item in values}:
+        return
+
+    values.append(text)
+
+
+def _resume_item_brief(section_name: str, item: Any) -> str:
+    if not isinstance(item, dict):
+        return _short_text(item, max_chars=260)
+
+    parts = []
+    for key in (
+        "job_title",
+        "company",
+        "project_name",
+        "degree",
+        "field_of_study",
+        "institution",
+        "summary",
+    ):
+        value = item.get(key)
+        if value:
+            parts.append(str(value))
+
+    for key in ("bullets", "skills", "relevant_courses"):
+        values = item.get(key)
+        if isinstance(values, list) and values:
+            parts.extend(str(value) for value in values[:2] if value)
+
+    if not parts:
+        parts = [
+            f"{key}: {value}"
+            for key, value in item.items()
+            if value and not isinstance(value, (dict, list))
+        ][:4]
+
+    prefix = f"{section_name}: " if section_name else ""
+    return _short_text(prefix + " | ".join(parts), max_chars=320)
+
+
+def _document_brief_from_request(request: QuestionRequest) -> dict[str, Any]:
+    resume = _model_dump(request.resume) if request.resume is not None else {}
+    job_description = (
+        _model_dump(request.job_description)
+        if request.job_description is not None
+        else {}
+    )
+
+    candidate = resume.get("candidate") if isinstance(resume, dict) else {}
+    if not isinstance(candidate, dict):
+        candidate = {}
+
+    candidate_parts = [
+        candidate.get("full_name"),
+        candidate.get("headline"),
+    ]
+    candidate_summary = _short_text(
+        " - ".join(str(part) for part in candidate_parts if part),
+        max_chars=260,
+    )
+
+    key_resume_evidence: list[str] = []
+    sections = resume.get("sections") if isinstance(resume, dict) else []
+    if isinstance(sections, list):
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            section_name = str(section.get("section_name") or "")
+            items = section.get("items") or []
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                _append_unique_text(
+                    key_resume_evidence,
+                    _resume_item_brief(section_name, item),
+                    max_items=8,
+                    max_chars=320,
+                )
+
+    for item in request.cv_context:
+        _append_unique_text(
+            key_resume_evidence,
+            item,
+            max_items=8,
+            max_chars=320,
+        )
+
+    role_parts = []
+    if isinstance(job_description, dict):
+        for key in (
+            "role_title",
+            "company",
+            "seniority",
+            "employment_type",
+            "location",
+            "summary",
+        ):
+            value = job_description.get(key)
+            if value:
+                role_parts.append(str(value))
+
+    role_summary = _short_text(" | ".join(role_parts), max_chars=320)
+
+    key_job_requirements: list[str] = []
+    if isinstance(job_description, dict):
+        for key in (
+            "responsibilities",
+            "requirements",
+            "preferred_skills",
+            "tech_stack",
+        ):
+            values = job_description.get(key) or []
+            if isinstance(values, list):
+                for value in values:
+                    _append_unique_text(
+                        key_job_requirements,
+                        value,
+                        max_items=10,
+                        max_chars=240,
+                    )
+
+    for item in request.job_description_context:
+        _append_unique_text(
+            key_job_requirements,
+            item,
+            max_items=10,
+            max_chars=320,
+        )
+
+    return clean_empty_fields(
+        {
+            "candidate_summary": candidate_summary,
+            "role_summary": role_summary,
+            "key_resume_evidence": key_resume_evidence,
+            "key_job_requirements": key_job_requirements,
+            "role_alignment_notes": [
+                "Use the planned question's resume_grounding and job_alignment together with this brief.",
+            ],
+            "fairness_notes": [
+                "Score only job-relevant observed evidence from the resume, job description, and candidate answers.",
+                "Do not infer protected characteristics or missing skills that are not evidenced.",
+            ],
+        }
+    )
+
+
 def _pick_fields(source: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
     return clean_empty_fields(
         {
@@ -247,6 +408,7 @@ def _compact_interview_plan_for_report(plan: dict[str, Any]) -> dict[str, Any]:
 
 def _build_compact_turn(
     *,
+    turn_index: int,
     question_index: int,
     question: dict[str, Any],
     answer: str,
@@ -255,7 +417,8 @@ def _build_compact_turn(
     routed_action: str,
 ) -> CompactTurn:
     compact_turn: CompactTurn = {
-        "question_index": question_index,
+        "turn_index": turn_index,
+        "question_index": question_index + 1,
         "question_text": _question_text(question),
         "answer": answer,
         "decision_action": routed_action,
@@ -292,6 +455,10 @@ def _build_compact_turn(
         values = _as_string_list(evaluation.get(source_key))
         if values:
             compact_turn[target_key] = values
+
+    delivery_assessment = evaluation.get("delivery_assessment")
+    if isinstance(delivery_assessment, dict) and delivery_assessment:
+        compact_turn["delivery_assessment"] = delivery_assessment
 
     if decision.get("reason"):
         compact_turn["decision_reason"] = str(decision["reason"])
@@ -362,6 +529,7 @@ def load_documents_node(state: GraphState) -> GraphState:
         "profile": profile,
         "resume_context": _resume_context_from_request(request),
         "job_description_context": _job_context_from_request(request),
+        "document_brief": _document_brief_from_request(request),
         "interview_type": request.interview_type,
         "difficulty": request.difficulty,
         "max_questions": int(profile.get("question_count") or 0),
@@ -404,11 +572,15 @@ def generate_plan_node(state: GraphState) -> GraphState:
     _ensure_question_ids(interview_questions)
     for question in interview_questions:
         question.pop("follow_up_questions", None)
+    document_brief = clean_empty_fields(
+        interview_plan.get("document_brief") or state.get("document_brief", {})
+    )
 
     return {
         "request_payload": {},
         "resume_context": "",
         "job_description_context": "",
+        "document_brief": document_brief,
         "interview_plan": _compact_interview_plan_for_report(interview_plan),
         "planned_questions": planned_questions,
         "status": "plan_ready",
@@ -452,6 +624,13 @@ def _select_question_from_plan(state: GraphState) -> tuple[int, dict[str, Any]]:
 
 def ask_question_node(state: GraphState) -> GraphState:
     question_index, current_question = _select_question_from_plan(state)
+    is_follow_up = bool(current_question.get("is_follow_up"))
+    trace_node = "ask_followup_question" if is_follow_up else "ask_question"
+    trace_message = (
+        "Received candidate answer for follow-up question."
+        if is_follow_up
+        else "Received candidate answer."
+    )
 
     answer_payload = interrupt(
         {
@@ -461,8 +640,15 @@ def ask_question_node(state: GraphState) -> GraphState:
         }
     )
 
+    delivery_metrics: dict[str, Any] = {}
+    answer_source = "text"
+
     if isinstance(answer_payload, dict):
         answer = str(answer_payload.get("answer", "")).strip()
+        raw_delivery_metrics = answer_payload.get("delivery_metrics")
+        if isinstance(raw_delivery_metrics, dict):
+            delivery_metrics = clean_empty_fields(raw_delivery_metrics)
+        answer_source = str(answer_payload.get("answer_source") or answer_source)
     else:
         answer = str(answer_payload or "").strip()
 
@@ -472,9 +658,11 @@ def ask_question_node(state: GraphState) -> GraphState:
     return {
         "current_question": current_question,
         "current_answer": answer,
+        "current_answer_source": answer_source,
+        "current_delivery_metrics": delivery_metrics,
         "status": "answer_received",
         "last_node": "ask_question",
-        "trace": _trace(state, "ask_question", "Received candidate answer."),
+        "trace": _trace(state, trace_node, trace_message),
     }
 
 
@@ -488,6 +676,8 @@ def evaluate_answer_node(state: GraphState) -> GraphState:
         expected_good_answer_points=_question_expected_points(current_question),
         student_answer=state["current_answer"],
         profile=state["profile"],
+        document_brief=state.get("document_brief"),
+        delivery_metrics=state.get("current_delivery_metrics") or None,
     )
     result = llm_client.call_llm_with_structured_output(
         prompt,
@@ -588,6 +778,7 @@ def decide_next_node(state: GraphState) -> GraphState:
 
     prompt = build_turn_decision_chat_prompt(
         profile=state["profile"],
+        document_brief=state.get("document_brief"),
         current_question=_compact_question_for_decision(current_question),
         current_answer=state["current_answer"],
         latest_evaluation=_compact_evaluation_for_decision(latest_evaluation),
@@ -625,6 +816,7 @@ def decide_next_node(state: GraphState) -> GraphState:
         routed_action=action,
     )
     compact_turn = _build_compact_turn(
+        turn_index=len(state.get("turn_summaries", [])) + 1,
         question_index=question_index,
         question=current_question,
         answer=state["current_answer"],
@@ -640,6 +832,12 @@ def decide_next_node(state: GraphState) -> GraphState:
         "decision": decision_json,
         "routed_action": action,
     }
+    answer_source = state.get("current_answer_source")
+    if answer_source:
+        turn["answer_source"] = answer_source
+    delivery_metrics = state.get("current_delivery_metrics")
+    if delivery_metrics:
+        turn["delivery_metrics"] = delivery_metrics
 
     updates: GraphState = {
         "latest_decision": decision_json,
@@ -682,6 +880,7 @@ def final_report_node(state: GraphState) -> GraphState:
         profile=state["profile"],
         interview_plan=interview_plan,
         turns=turns,
+        document_brief=state.get("document_brief"),
     )
     result = llm_client.call_llm_with_structured_output(
         prompt,

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import replace
 import math
 from pathlib import Path
+from typing import Any
 
 import cv2
 
@@ -12,41 +15,41 @@ from app.video_analysis.features import (
     calculate_blur_score,
     calculate_brightness,
     crop_box_region,
-    count_smile_candidates_in_face,
     detect_faces,
     filter_face_boxes,
     filter_significant_face_boxes,
     is_box_centered,
     load_haar_cascade,
-    pick_largest_box,
+    pick_tracked_face,
 )
 from app.video_analysis.schemas import (
     HeadMovementAmount,
+    VideoAnalysisConfig,
     VideoAnalysisResult,
     VideoPresentationMetrics,
     VideoQualityMetrics,
 )
 
 
-LOW_LIGHTING_THRESHOLD = 60
-# Laplacian blur scores vary a lot by camera/video codec, so keep this conservative.
-BLURRY_THRESHOLD = 15
-FACE_DETECTION_SCALE_FACTOR = 1.08
-FACE_DETECTION_MIN_NEIGHBORS = 8
-FACE_DETECTION_MIN_SIZE = 90
-MIN_RAW_SMILE_CANDIDATES = 15
-
-
 class VideoAnalyzer:
     """Analyze basic quality and face visibility signals from a video file."""
 
-    def __init__(self) -> None:
+    def __init__(self, config: VideoAnalysisConfig | None = None) -> None:
+        self.config = config or VideoAnalysisConfig()
         self.face_cascade = load_haar_cascade("haarcascade_frontalface_default.xml")
         if self.face_cascade is None:
             cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
             raise RuntimeError(f"Failed to load Haar cascade at: {cascade_path}")
 
-        self.smile_cascade = load_haar_cascade("haarcascade_smile.xml")
+        self.deepface = self._load_deepface() if self.config.enable_emotion_analysis else None
+
+    def _load_deepface(self) -> Any | None:
+        """Import DeepFace only when emotion analysis is enabled."""
+        try:
+            from deepface import DeepFace
+        except Exception:
+            return None
+        return DeepFace
 
     def _head_movement_label(self, score: float) -> str:
         if score < 0.04:
@@ -55,37 +58,57 @@ class VideoAnalyzer:
             return "moderate"
         return "high"
 
-    def _calculate_smile_frequency(self, candidate_counts: list[int]) -> float:
-        """
-        Estimate smile frequency from raw Haar smile candidate counts.
+    def _deepface_emotion(self, frame: Any) -> tuple[str | None, float | None]:
+        """Return dominant emotion and happy score from DeepFace, if possible."""
+        if self.deepface is None:
+            return None, None
 
-        This follows OpenCV's smile demo idea: raw nested detections are more
-        useful as an intensity signal than a single yes/no cascade box.
-        """
-        if not candidate_counts:
-            return 0.0
-
-        max_count = max(candidate_counts)
-        min_count = min(candidate_counts)
-
-        if max_count < MIN_RAW_SMILE_CANDIDATES:
-            return 0.0
-
-        if max_count == min_count:
-            return 1.0 if max_count >= MIN_RAW_SMILE_CANDIDATES * 2 else 0.0
-
-        dynamic_threshold = min_count + max(3, int((max_count - min_count) * 0.45))
-        smiling_frames = sum(
-            1
-            for count in candidate_counts
-            if count >= MIN_RAW_SMILE_CANDIDATES and count >= dynamic_threshold
+        result = self.deepface.analyze(
+            frame,
+            actions=["emotion"],
+            enforce_detection=False,
         )
-        return smiling_frames / len(candidate_counts)
+        if isinstance(result, list):
+            if not result:
+                return None, None
+            result = result[0]
 
-    def analyze(self, video_path: str, sample_every_n: int = 10) -> VideoAnalysisResult:
-        """Analyze a video and return a JSON-friendly summary object."""
-        if sample_every_n <= 0:
+        if not isinstance(result, dict):
+            return None, None
+
+        dominant_emotion = result.get("dominant_emotion")
+        emotions = result.get("emotion") or {}
+        happy_score = emotions.get("happy")
+        if happy_score is None:
+            return str(dominant_emotion) if dominant_emotion else None, None
+
+        return (
+            str(dominant_emotion) if dominant_emotion else None,
+            float(happy_score),
+        )
+
+    def _runtime_config(
+        self,
+        sample_every_n: int | None,
+        config: VideoAnalysisConfig | None,
+    ) -> VideoAnalysisConfig:
+        runtime_config = config or self.config
+        if sample_every_n is not None:
+            runtime_config = replace(runtime_config, sample_every_n=sample_every_n)
+        if runtime_config.sample_every_n <= 0:
             raise ValueError("sample_every_n must be greater than 0.")
+        if runtime_config.min_face_size <= 0:
+            raise ValueError("min_face_size must be greater than 0.")
+        return runtime_config
+
+    def analyze(
+        self,
+        video_path: str,
+        sample_every_n: int | None = None,
+        config: VideoAnalysisConfig | None = None,
+    ) -> VideoAnalysisResult:
+        """Analyze a video and return a JSON-friendly summary object."""
+        runtime_config = self._runtime_config(sample_every_n, config)
 
         path = Path(video_path).expanduser()
         if not path.exists():
@@ -96,6 +119,8 @@ class VideoAnalyzer:
             raise ValueError(f"Could not open video file: {path}")
 
         warnings: list[str] = []
+        if runtime_config.enable_emotion_analysis and self.deepface is None:
+            self.deepface = self._load_deepface()
 
         try:
             frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -109,17 +134,21 @@ class VideoAnalyzer:
             frames_with_face = 0
             camera_facing_frames = 0
             centered_frames = 0
-            smile_candidate_counts: list[int] = []
+            happy_frames = 0
+            happy_scores: list[float] = []
+            emotion_failures = 0
+            dominant_emotions: Counter[str] = Counter()
             multiple_faces_detected = False
             brightness_total = 0.0
             blur_total = 0.0
             movement_total = 0.0
             movement_steps = 0
             previous_face_center: tuple[float, float] | None = None
+            previous_main_face = None
             frame_diagonal = math.hypot(width, height) if width and height else 1.0
 
-            if self.smile_cascade is None:
-                warnings.append("Smile detection unavailable")
+            emotion_requested = runtime_config.enable_emotion_analysis
+            emotion_import_available = self.deepface is not None
 
             frame_index = 0
             while True:
@@ -127,24 +156,27 @@ class VideoAnalyzer:
                 if not ok:
                     break
 
-                if frame_index % sample_every_n == 0:
+                if frame_index % runtime_config.sample_every_n == 0:
                     sampled_frames += 1
 
                     brightness = calculate_brightness(frame)
                     raw_faces = detect_faces(
                         frame,
                         self.face_cascade,
-                        scale_factor=FACE_DETECTION_SCALE_FACTOR,
-                        min_neighbors=FACE_DETECTION_MIN_NEIGHBORS,
-                        min_face_size=FACE_DETECTION_MIN_SIZE,
+                        scale_factor=runtime_config.face_scale_factor,
+                        min_neighbors=runtime_config.face_min_neighbors,
+                        min_face_size=runtime_config.min_face_size,
                     )
                     valid_faces = filter_face_boxes(
                         raw_faces,
                         frame_height=height,
                         frame_width=width,
-                        min_face_size=FACE_DETECTION_MIN_SIZE,
+                        min_face_size=runtime_config.min_face_size,
+                        aspect_ratio_min=runtime_config.face_aspect_ratio_min,
+                        aspect_ratio_max=runtime_config.face_aspect_ratio_max,
+                        max_center_y_ratio=runtime_config.max_face_center_y_ratio,
                     )
-                    main_face = pick_largest_box(valid_faces)
+                    main_face = pick_tracked_face(valid_faces, previous_main_face)
                     significant_faces = filter_significant_face_boxes(
                         valid_faces,
                         main_face,
@@ -163,9 +195,18 @@ class VideoAnalyzer:
 
                     if main_face is not None:
                         frames_with_face += 1
+                        previous_main_face = main_face
                         face_center = box_center(main_face)
 
-                        if is_box_centered(main_face, width, height):
+                        if is_box_centered(
+                            main_face,
+                            width,
+                            height,
+                            x_min_ratio=runtime_config.center_x_min_ratio,
+                            x_max_ratio=runtime_config.center_x_max_ratio,
+                            y_min_ratio=runtime_config.center_y_min_ratio,
+                            y_max_ratio=runtime_config.center_y_max_ratio,
+                        ):
                             centered_frames += 1
                             # This accepts screen-facing or camera-facing posture; it is not gaze tracking.
                             camera_facing_frames += 1
@@ -179,14 +220,30 @@ class VideoAnalyzer:
 
                         previous_face_center = face_center
 
-                        if self.smile_cascade is not None:
-                            smile_candidate_counts.append(
-                                count_smile_candidates_in_face(
-                                    frame,
-                                    main_face,
-                                    self.smile_cascade,
-                                )
-                            )
+                        if emotion_requested and emotion_import_available:
+                            try:
+                                face_crop = crop_box_region(frame, main_face, margin_ratio=0.05)
+                                dominant_emotion, happy_score = self._deepface_emotion(face_crop)
+                            except Exception:
+                                emotion_failures += 1
+                            else:
+                                if happy_score is None:
+                                    emotion_failures += 1
+                                else:
+                                    happy_scores.append(happy_score)
+                                    if dominant_emotion:
+                                        dominant_emotions[dominant_emotion] += 1
+                                    if (
+                                        dominant_emotion == "happy"
+                                        or happy_score >= runtime_config.happy_score_threshold
+                                    ):
+                                        happy_frames += 1
+
+                    if (
+                        runtime_config.max_analyzed_frames is not None
+                        and sampled_frames >= runtime_config.max_analyzed_frames
+                    ):
+                        break
 
                 frame_index += 1
 
@@ -196,31 +253,53 @@ class VideoAnalyzer:
                 face_visible_ratio = 0.0
                 camera_facing_ratio = 0.0
                 candidate_centered_ratio = 0.0
-                smile_frequency = None if self.smile_cascade is None else 0.0
-                warnings.append("No frames could be sampled")
+                emotion_analysis_available = False
+                happy_frame_ratio = None
+                happy_score_mean = None
+                warnings.append("no_frames_sampled")
             else:
                 brightness_mean = brightness_total / sampled_frames
                 blur_score_mean = blur_total / sampled_frames
                 face_visible_ratio = frames_with_face / sampled_frames
                 camera_facing_ratio = camera_facing_frames / sampled_frames
                 candidate_centered_ratio = centered_frames / sampled_frames
-                smile_frequency = (
-                    None
-                    if self.smile_cascade is None
-                    else self._calculate_smile_frequency(smile_candidate_counts)
+                emotion_analysis_available = bool(happy_scores)
+                happy_frame_ratio = (
+                    happy_frames / len(happy_scores)
+                    if emotion_analysis_available
+                    else None
+                )
+                happy_score_mean = (
+                    sum(happy_scores) / len(happy_scores)
+                    if emotion_analysis_available
+                    else None
                 )
 
                 if frames_with_face == 0:
-                    warnings.append("No face detected in sampled frames")
-                if brightness_mean < LOW_LIGHTING_THRESHOLD:
-                    warnings.append("Low lighting detected")
-                if blur_score_mean < BLURRY_THRESHOLD:
-                    warnings.append("Video appears blurry")
+                    warnings.append("no_face_detected")
+                elif face_visible_ratio < runtime_config.low_face_visibility_threshold:
+                    warnings.append("low_face_visibility")
+                if brightness_mean < runtime_config.low_brightness_threshold:
+                    warnings.append("low_brightness")
+                if blur_score_mean < runtime_config.blurry_threshold:
+                    warnings.append("blurry_video")
                 if multiple_faces_detected:
-                    warnings.append("Multiple faces detected")
+                    warnings.append("multiple_faces_detected")
+
+                if emotion_requested and not emotion_analysis_available:
+                    warnings.append("emotion_analysis_unavailable")
+                if emotion_analysis_available and (
+                    emotion_failures > 0
+                    or face_visible_ratio < runtime_config.low_face_visibility_threshold
+                    or brightness_mean < runtime_config.low_brightness_threshold
+                    or blur_score_mean < runtime_config.blurry_threshold
+                ):
+                    warnings.append("emotion_analysis_may_be_unreliable")
+
+            smile_frequency = happy_frame_ratio
 
             warnings.append(
-                "Camera-facing ratio is approximate; it accepts screen-facing or camera-facing posture and does not measure real eye contact"
+                "camera_facing_ratio_is_approximate_not_eye_contact"
             )
 
             movement_score = movement_total / movement_steps if movement_steps else 0.0
@@ -242,6 +321,10 @@ class VideoAnalyzer:
                         score=movement_score,
                         label=self._head_movement_label(movement_score),
                     ),
+                    emotion_analysis_available=emotion_analysis_available,
+                    happy_frame_ratio=happy_frame_ratio,
+                    happy_score_mean=happy_score_mean,
+                    dominant_emotion_counts=dict(dominant_emotions),
                     smile_frequency=smile_frequency,
                 ),
                 video_quality=VideoQualityMetrics(

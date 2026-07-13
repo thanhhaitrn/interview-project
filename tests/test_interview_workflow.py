@@ -15,7 +15,7 @@ from app.agent.outputs import (
     clean_empty_fields,
 )
 from app.agent.profile import get_agent_profile
-from app.graph.nodes import ask_question_node, generate_plan_node
+from app.graph.nodes import ask_question_node, evaluate_answer_node, generate_plan_node
 from app.graph.workflow import resume_interview, start_interview, workflow_steps
 
 
@@ -60,6 +60,14 @@ class InterviewWorkflowTestCase(unittest.TestCase):
                         "seniority_level": "junior",
                         "difficulty_level": "medium",
                         "question_count": 2,
+                        "document_brief": {
+                            "candidate_summary": "Backend candidate with API and SQL experience.",
+                            "role_summary": "Backend Engineer role focused on APIs and SQL performance.",
+                            "key_resume_evidence": ["REST API work", "SQL debugging"],
+                            "key_job_requirements": ["Build APIs", "Debug SQL performance"],
+                            "role_alignment_notes": ["API and SQL evidence aligns to the role."],
+                            "fairness_notes": ["Score only observed evidence."],
+                        },
                         "questions": [
                             {
                                 "id": "q1",
@@ -105,6 +113,9 @@ class InterviewWorkflowTestCase(unittest.TestCase):
                 prompt_text = prompt.to_string()
                 self.assertNotIn("Resume JSON", prompt_text)
                 self.assertNotIn("Job description JSON", prompt_text)
+                self.assertNotIn("Delivery metrics JSON", prompt_text)
+                self.assertIn("Document brief JSON", prompt_text)
+                self.assertIn("Backend candidate with API and SQL experience.", prompt_text)
                 self.assertIn("Question JSON", prompt_text)
                 self.assertNotIn("Built REST APIs with SQL debugging.", prompt_text)
                 return schema.model_validate(
@@ -132,6 +143,8 @@ class InterviewWorkflowTestCase(unittest.TestCase):
             if schema is TurnDecisionOutput:
                 prompt_text = prompt.to_string()
                 decision_prompts.append(prompt_text)
+                self.assertIn("Document brief JSON", prompt_text)
+                self.assertIn("Debug SQL performance", prompt_text)
                 self.assertIn("Current question JSON", prompt_text)
                 self.assertIn("Latest evaluation JSON", prompt_text)
                 self.assertNotIn('"question": {', prompt_text)
@@ -145,6 +158,8 @@ class InterviewWorkflowTestCase(unittest.TestCase):
 
             if schema is FinalInterviewReportOutput:
                 prompt_text = prompt.to_string()
+                self.assertIn("Document brief JSON", prompt_text)
+                self.assertIn("Backend Engineer role focused on APIs", prompt_text)
                 self.assertIn("turns JSON", prompt_text)
                 self.assertIn("question_text", prompt_text)
                 self.assertNotIn('"question": {', prompt_text)
@@ -202,18 +217,175 @@ class InterviewWorkflowTestCase(unittest.TestCase):
             final_state["turn_summaries"][0]["question_text"],
             "Describe an API you built.",
         )
+        self.assertEqual(final_state["turn_summaries"][0]["turn_index"], 1)
+        self.assertEqual(final_state["turn_summaries"][0]["question_index"], 1)
+        self.assertEqual(final_state["turn_summaries"][1]["turn_index"], 2)
+        self.assertEqual(final_state["turn_summaries"][1]["question_index"], 2)
         self.assertEqual(final_state["turn_summaries"][0]["decision_action"], "next_question")
         self.assertEqual(final_state["turns"][0]["routed_action"], "next_question")
+        self.assertEqual(final_state["turns"][0]["question_index"], 0)
+        self.assertIn("document_brief", final_state)
+        self.assertEqual(
+            final_state["document_brief"]["candidate_summary"],
+            "Backend candidate with API and SQL experience.",
+        )
         self.assertGreaterEqual(len(final_state["trace"]), 7)
         self.assertNotIn(
             "I designed REST endpoints and tested error handling.",
             decision_prompts[-1],
         )
 
+    def test_delivery_metrics_payload_reaches_evaluation_prompt(self):
+        payload = {
+            "cv_context": ["Built REST APIs"],
+            "job_description_context": ["Backend role requiring clear communication"],
+            "interview_config": {"question_count": 1},
+        }
+        checkpointer = InMemorySaver()
+
+        def fake_structured_call(prompt, schema, **kwargs):
+            if schema is GeneratedQuestionOutput:
+                return schema.model_validate(
+                    {
+                        "question_count": 1,
+                        "document_brief": {
+                            "candidate_summary": "Backend candidate.",
+                            "role_summary": "Backend role.",
+                            "key_resume_evidence": ["REST APIs"],
+                            "key_job_requirements": ["Clear communication"],
+                        },
+                        "questions": [
+                            {
+                                "id": "q1",
+                                "question": "Describe an API you built.",
+                                "competency": "API Development",
+                                "expected_strong_answer_signals": ["Concrete details"],
+                            }
+                        ],
+                    }
+                )
+
+            if schema is EvaluatedAnswerOutput:
+                prompt_text = prompt.to_string()
+                self.assertIn("Delivery metrics JSON", prompt_text)
+                self.assertIn("speech_rate_wpm", prompt_text)
+                self.assertIn("candidate_centered_ratio", prompt_text)
+                self.assertIn("video_quality", prompt_text)
+                self.assertIn("multiple_faces_detected", prompt_text)
+                return schema.model_validate(
+                    {
+                        "overall_score": 4,
+                        "summary": "Relevant answer with usable delivery data.",
+                        "delivery_assessment": {
+                            "fluency_rating": "fair",
+                            "voice_steadiness": "steady",
+                            "observations": ["Speech rate was within range."],
+                            "impact_on_communication": "Delivery supported clarity.",
+                        },
+                    }
+                )
+
+            if schema is TurnDecisionOutput:
+                return schema.model_validate(
+                    {
+                        "action": "final_report",
+                        "reason": "Enough evidence for this one-question interview.",
+                    }
+                )
+
+            if schema is FinalInterviewReportOutput:
+                return schema.model_validate(
+                    {
+                        "overall_recommendation": "positive",
+                        "summary": "Completed with delivery-aware evaluation.",
+                    }
+                )
+
+            raise AssertionError(f"Unexpected schema: {schema}")
+
+        with patch(
+            "app.agent.llm_client.call_llm_with_structured_output",
+            side_effect=fake_structured_call,
+        ):
+            started = start_interview(
+                payload,
+                thread_id="delivery-metrics-thread",
+                checkpointer=checkpointer,
+            )
+            self.assertIn("__interrupt__", started)
+            final_state = resume_interview(
+                thread_id="delivery-metrics-thread",
+                answer={
+                    "answer": "I built REST endpoints and explained the tradeoffs.",
+                    "answer_source": "video_file",
+                    "delivery_metrics": {
+                        "fluency": {"speech_rate_wpm": 126, "pause_count": 2},
+                        "face": {"candidate_centered_ratio": 0.92},
+                        "video_quality": {
+                            "brightness_mean": 104.2,
+                            "multiple_faces_detected": False,
+                        },
+                    },
+                },
+                checkpointer=checkpointer,
+            )
+
+        self.assertEqual(final_state["status"], "completed")
+        self.assertEqual(final_state["current_answer_source"], "video_file")
+        self.assertEqual(
+            final_state["turns"][0]["delivery_metrics"]["fluency"]["speech_rate_wpm"],
+            126,
+        )
+        self.assertIn("video_quality", final_state["turns"][0]["delivery_metrics"])
+        self.assertEqual(
+            final_state["turn_summaries"][0]["delivery_assessment"]["fluency_rating"],
+            "fair",
+        )
+
+    def test_audio_delivery_metrics_reach_evaluation_prompt_without_video(self):
+        prompts: list[str] = []
+        state = {
+            "current_question": {
+                "id": "q1",
+                "question": "Describe an API you built.",
+                "expected_strong_answer_signals": ["Concrete details"],
+            },
+            "current_answer": "I built REST endpoints and explained tradeoffs.",
+            "current_delivery_metrics": {
+                "fluency": {"speech_rate_wpm": 126, "pause_count": 2},
+                "voice": {"tremor_label": "steady"},
+            },
+            "profile": get_agent_profile(),
+            "document_brief": {"candidate_summary": "Backend candidate."},
+            "debug_trace": True,
+        }
+
+        def fake_structured_call(prompt, schema, **kwargs):
+            prompts.append(prompt.to_string())
+            return schema.model_validate(
+                {
+                    "overall_score": 4,
+                    "summary": "Audio delivery metrics were considered.",
+                }
+            )
+
+        with patch(
+            "app.agent.llm_client.call_llm_with_structured_output",
+            side_effect=fake_structured_call,
+        ):
+            result = evaluate_answer_node(state)
+
+        self.assertEqual(result["latest_evaluation"]["overall_score"], 4)
+        self.assertIn("Delivery metrics JSON", prompts[0])
+        self.assertIn("speech_rate_wpm", prompts[0])
+        self.assertIn("tremor_label", prompts[0])
+        self.assertNotIn("video_quality", prompts[0])
+
     def test_generate_plan_assigns_missing_question_ids(self):
         state = {
             "resume_context": "{}",
             "job_description_context": "{}",
+            "document_brief": {"candidate_summary": "Existing compact brief."},
             "interview_type": "technical",
             "difficulty": "medium",
             "profile": get_agent_profile(question_count=2),
@@ -241,6 +413,10 @@ class InterviewWorkflowTestCase(unittest.TestCase):
         self.assertEqual(result["planned_questions"][0]["id"], "q1")
         self.assertEqual(result["planned_questions"][1]["id"], "q2")
         self.assertEqual(result["interview_plan"]["questions"][0]["id"], "q1")
+        self.assertEqual(
+            result["document_brief"]["candidate_summary"],
+            "Existing compact brief.",
+        )
 
     def test_question_limit_forces_final_report(self):
         payload = {
@@ -359,6 +535,36 @@ class InterviewWorkflowTestCase(unittest.TestCase):
         self.assertEqual(asked_question["competency"], "API Development")
         self.assertEqual(result["current_answer"], "Latency improved by 20%.")
         self.assertEqual(result["current_question"], asked_question)
+        self.assertEqual(result["last_node"], "ask_question")
+        self.assertEqual(result["trace"][0]["node"], "ask_followup_question")
+        self.assertEqual(
+            result["trace"][0]["message"],
+            "Received candidate answer for follow-up question.",
+        )
+
+    def test_ask_question_trace_keeps_base_question_label(self):
+        state = {
+            "debug_trace": True,
+            "planned_questions": [
+                {
+                    "id": "q1",
+                    "question": "Describe a backend API you implemented.",
+                    "competency": "API Development",
+                }
+            ],
+            "current_question_index": 0,
+            "pending_followup_question": None,
+        }
+
+        with patch(
+            "app.graph.nodes.interrupt",
+            return_value={"answer": "I built REST endpoints."},
+        ):
+            result = ask_question_node(state)
+
+        self.assertEqual(result["last_node"], "ask_question")
+        self.assertEqual(result["trace"][0]["node"], "ask_question")
+        self.assertEqual(result["trace"][0]["message"], "Received candidate answer.")
 
     def test_followup_is_generated_after_answer_and_limited_to_one(self):
         payload = {
@@ -454,6 +660,11 @@ class InterviewWorkflowTestCase(unittest.TestCase):
 
         self.assertEqual(final_state["status"], "completed")
         self.assertEqual(len(final_state["turns"]), 2)
+        self.assertEqual(final_state["turn_summaries"][0]["turn_index"], 1)
+        self.assertEqual(final_state["turn_summaries"][0]["question_index"], 1)
+        self.assertEqual(final_state["turn_summaries"][1]["turn_index"], 2)
+        self.assertEqual(final_state["turn_summaries"][1]["question_index"], 1)
+        self.assertTrue(final_state["turn_summaries"][1]["is_follow_up"])
         self.assertEqual(final_state["turns"][0]["routed_action"], "follow_up")
         self.assertEqual(final_state["turns"][1]["routed_action"], "final_report")
 

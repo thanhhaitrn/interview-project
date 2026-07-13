@@ -77,6 +77,9 @@ def filter_face_boxes(
     frame_height: int,
     frame_width: int | None = None,
     min_face_size: int = 90,
+    aspect_ratio_min: float = 0.75,
+    aspect_ratio_max: float = 1.35,
+    max_center_y_ratio: float = 0.85,
 ) -> list[Box]:
     """Remove common false-positive face boxes."""
     valid: list[Box] = []
@@ -89,11 +92,11 @@ def filter_face_boxes(
             continue
 
         aspect_ratio = float(w) / float(h) if h > 0 else 0.0
-        if aspect_ratio < 0.75 or aspect_ratio > 1.35:
+        if aspect_ratio < aspect_ratio_min or aspect_ratio > aspect_ratio_max:
             continue
 
         center_y = y + (h / 2.0)
-        if center_y > frame_height * 0.85:
+        if center_y > frame_height * max_center_y_ratio:
             continue
 
         valid.append((x, y, w, h))
@@ -134,79 +137,39 @@ def box_center(box: Box) -> tuple[float, float]:
     return x + (w / 2.0), y + (h / 2.0)
 
 
+def pick_tracked_face(
+    boxes: list[Box],
+    previous_box: Box | None,
+) -> Box | None:
+    """Prefer the face nearest to the previous main face; fall back to largest."""
+    if not boxes:
+        return None
+    if previous_box is None:
+        return pick_largest_box(boxes)
+
+    previous_center = box_center(previous_box)
+    return min(
+        boxes,
+        key=lambda box: (
+            abs(box_center(box)[0] - previous_center[0])
+            + abs(box_center(box)[1] - previous_center[1])
+        ),
+    )
+
+
 def is_box_centered(
     box: Box,
     frame_width: int,
     frame_height: int,
+    *,
+    x_min_ratio: float = 0.30,
+    x_max_ratio: float = 0.70,
+    y_min_ratio: float = 0.20,
+    y_max_ratio: float = 0.75,
 ) -> bool:
     """Check whether the main face center is in the central frame region."""
     center_x, center_y = box_center(box)
     return (
-        frame_width * 0.30 <= center_x <= frame_width * 0.70
-        and frame_height * 0.20 <= center_y <= frame_height * 0.75
+        frame_width * x_min_ratio <= center_x <= frame_width * x_max_ratio
+        and frame_height * y_min_ratio <= center_y <= frame_height * y_max_ratio
     )
-
-
-def detect_smile_in_face(
-    frame: Any,
-    face_box: Box,
-    smile_cascade: Any,
-) -> bool:
-    """Detect a smile inside the lower half of the main face."""
-    return count_smile_candidates_in_face(frame, face_box, smile_cascade) >= 8
-
-
-def count_smile_candidates_in_face(
-    frame: Any,
-    face_box: Box,
-    smile_cascade: Any,
-) -> int:
-    """Count raw smile candidates in the lower half of the main face."""
-    x, y, w, h = face_box
-
-    mouth_x1 = x
-    mouth_x2 = x + w
-    mouth_y1 = y + int(h * 0.50)
-    mouth_y2 = y + h
-    mouth_region = frame[mouth_y1:mouth_y2, mouth_x1:mouth_x2]
-    if mouth_region.size == 0:
-        return 0
-
-    gray_mouth = cv2.cvtColor(mouth_region, cv2.COLOR_BGR2GRAY)
-    gray_mouth = cv2.equalizeHist(gray_mouth)
-
-    min_smile_size = (
-        max(24, int(w * 0.12)),
-        max(12, int(h * 0.06)),
-    )
-    max_smile_size = (
-        max(min_smile_size[0] + 1, int(w * 0.90)),
-        max(min_smile_size[1] + 1, int(h * 0.45)),
-    )
-
-    smiles = smile_cascade.detectMultiScale(
-        gray_mouth,
-        scaleFactor=1.1,
-        minNeighbors=0,
-        minSize=min_smile_size,
-        maxSize=max_smile_size,
-    )
-
-    valid_count = 0
-    for smile_box in smiles:
-        _, _, smile_width, smile_height = smile_box
-        if smile_height <= 0:
-            continue
-
-        aspect_ratio = float(smile_width) / float(smile_height)
-        width_ratio = float(smile_width) / float(w)
-        height_ratio = float(smile_height) / float(h)
-
-        if (
-            1.2 <= aspect_ratio <= 9.0
-            and 0.12 <= width_ratio <= 0.90
-            and 0.04 <= height_ratio <= 0.45
-        ):
-            valid_count += 1
-
-    return valid_count

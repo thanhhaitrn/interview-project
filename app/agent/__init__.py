@@ -5,6 +5,7 @@ from app.agent.agent import (
     interview_agent,
 )
 from app.agent.outputs import (
+    DocumentBriefOutput,
     EvaluatedAnswerOutput,
     FinalInterviewReportOutput,
     GeneratedQuestionOutput,
@@ -38,6 +39,7 @@ from app.agent.prompts import (
 __all__ = [
     "AGENT_PROFILE",
     "AgentProfile",
+    "DocumentBriefOutput",
     "InterviewAgent",
     "EvaluatedAnswerOutput",
     "FinalInterviewReportOutput",

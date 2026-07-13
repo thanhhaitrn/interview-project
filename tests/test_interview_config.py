@@ -7,7 +7,11 @@ import unittest
 from pathlib import Path
 
 from app.agent import get_agent_profile
-from app.agent.prompts import build_evaluation_prompt, build_question_prompt
+from app.agent.prompts import (
+    build_evaluation_prompt,
+    build_question_prompt,
+    build_turn_decision_chat_prompt,
+)
 from app.agent.profile import (
     build_evaluation_profile,
     build_question_profile,
@@ -81,6 +85,14 @@ class InterviewConfigTestCase(unittest.TestCase):
         self.assertIn("Do not leave output fields blank", prompt)
         self.assertIn("Do not pre-generate follow-up questions", prompt)
         self.assertIn("max_followups_per_question", prompt)
+        self.assertIn("prefer_balanced_coverage", prompt)
+        self.assertIn("project_deep_dive", prompt)
+        self.assertIn("Deeply examine a real project", prompt)
+        self.assertIn("behavioral_star", prompt)
+        self.assertIn("Situation, Task, Action, Result", prompt)
+        self.assertIn("coverage_summary", prompt)
+        self.assertIn("document_brief", prompt)
+        self.assertIn("candidate evidence", prompt)
         self.assertIn("GeneratedQuestionOutput", prompt)
         self.assertIn('"expected_strong_answer_signals"', prompt)
         self.assertIn("Task:", prompt)
@@ -93,14 +105,79 @@ class InterviewConfigTestCase(unittest.TestCase):
             expected_good_answer_points=["Incident", "Diagnosis", "Fix", "Outcome"],
             student_answer="I investigated logs, identified a query bottleneck, and improved latency.",
             profile=get_agent_profile(),
+            document_brief={
+                "candidate_summary": "Backend candidate with Python API evidence.",
+                "key_job_requirements": ["API debugging", "communication"],
+            },
         )
 
         self.assertIn("Evaluation config JSON", prompt)
+        self.assertIn("Document brief JSON", prompt)
+        self.assertIn("Backend candidate with Python API evidence.", prompt)
         self.assertIn("Rubric JSON", prompt)
         self.assertIn("Rating anchors JSON", prompt)
         self.assertIn("Score only observed answer evidence", prompt)
         self.assertIn("EvaluatedAnswerOutput", prompt)
         self.assertIn("Candidate answer", prompt)
+
+    def test_evaluation_prompt_includes_video_delivery_metrics_when_provided(self):
+        prompt = build_evaluation_prompt(
+            cv_context=["Implemented backend APIs in Python"],
+            job_description_context=["Role requires API debugging and communication"],
+            question="Tell me about a backend incident you resolved.",
+            expected_good_answer_points=["Incident", "Diagnosis", "Fix", "Outcome"],
+            student_answer="I investigated logs and improved latency.",
+            profile=get_agent_profile(),
+            delivery_metrics={
+                "fluency": {"speech_rate_wpm": 126},
+                "face": {"face_visible_ratio": 0.92, "candidate_centered_ratio": 0.84},
+                "video_quality": {
+                    "brightness_mean": 105.0,
+                    "blur_score_mean": 98.0,
+                    "multiple_faces_detected": False,
+                },
+            },
+        )
+
+        self.assertIn("Delivery metrics JSON", prompt)
+        self.assertIn("speech_rate_wpm", prompt)
+        self.assertIn("face_visible_ratio", prompt)
+        self.assertIn("video_quality", prompt)
+        self.assertIn("multiple_faces_detected", prompt)
+        self.assertIn("video presentation metrics", prompt)
+
+    def test_turn_decision_prompt_requires_one_integrated_followup(self):
+        prompt = build_turn_decision_chat_prompt(
+            profile=get_agent_profile(),
+            document_brief={
+                "candidate_summary": "Backend candidate.",
+                "key_job_requirements": ["API implementation depth"],
+            },
+            current_question={
+                "id": "q1",
+                "question": "Describe an API you built.",
+                "competency": "API Development",
+            },
+            current_answer="I built a REST API.",
+            latest_evaluation={
+                "overall_score": 2,
+                "summary": "Missing implementation details and metrics.",
+            },
+            turns=[],
+            current_question_index=0,
+            planned_question_count=2,
+            max_questions=2,
+            current_followup_count=0,
+            max_followups_per_question=1,
+        ).to_string()
+
+        self.assertIn("one integrated question", prompt)
+        self.assertIn("Document brief JSON", prompt)
+        self.assertIn("API implementation depth", prompt)
+        self.assertIn("most important missing evidence", prompt)
+        self.assertIn("multiple independent questions", prompt)
+        self.assertIn("multiple question marks", prompt)
+        self.assertIn("answer-aware, integrated follow_up_question", prompt)
 
 
 if __name__ == "__main__":

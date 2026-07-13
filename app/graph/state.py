@@ -67,6 +67,7 @@ class DecisionState(TypedDict, total=False):
 
 
 class CompactTurn(TypedDict, total=False):
+    turn_index: int
     question_index: int
     question_id: str
     question_text: str
@@ -80,6 +81,7 @@ class CompactTurn(TypedDict, total=False):
     strengths: list[str]
     weaknesses: list[str]
     red_flags: list[str]
+    delivery_assessment: dict[str, Any]
     decision_action: TurnAction
     decision_reason: str
     follow_up_question: str
@@ -105,6 +107,7 @@ class GraphState(TypedDict, total=False):
     profile: dict[str, Any]
     resume_context: str
     job_description_context: str
+    document_brief: dict[str, Any]
     interview_type: str
     difficulty: str | None
     max_questions: int
@@ -122,6 +125,8 @@ class GraphState(TypedDict, total=False):
     last_node: str
     current_question: dict[str, Any]
     current_answer: str
+    current_answer_source: str
+    current_delivery_metrics: dict[str, Any]
     latest_evaluation: EvaluationState
     latest_decision: DecisionState
     final_report: FinalReportState

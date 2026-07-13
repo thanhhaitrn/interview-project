@@ -25,6 +25,9 @@ INTERVIEW_RUNS_DIR = DATA_DIR / "interview_runs"
 VIDEO_DIR = DATA_DIR / "video"
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 ANSWER_EVALS_DIR = DATA_DIR / "answer_evaluations"
+AUDIO_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
+VIDEO_SUFFIXES = {".avi", ".mkv", ".mov", ".mp4", ".webm"}
+MEDIA_SUFFIXES = AUDIO_SUFFIXES | VIDEO_SUFFIXES
 
 
 def build_mermaid_workflow() -> str:
@@ -70,6 +73,10 @@ def _write_json(path: Path, payload: Any) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _interview_run_name(started_at: datetime, thread_id: str) -> str:
+    return f"{started_at.strftime('%Y%m%d_%H%M%S')}_{thread_id[:8]}"
 
 
 def _list_files(folder: Path, suffixes: set[str]) -> list[Path]:
@@ -122,6 +129,452 @@ def _select_path(
                 return files[choice - 1]
 
         print("Invalid choice. Please enter one of the listed numbers.")
+
+
+def _validate_existing_media_path(
+    path: Path,
+    *,
+    label: str,
+    suffixes: set[str],
+) -> Path:
+    if not path.exists():
+        raise ValueError(f"{label} file does not exist: {path}")
+    if path.suffix.lower() not in suffixes:
+        supported = ", ".join(sorted(suffixes))
+        raise ValueError(f"{label} file must use one of: {supported}")
+    return path
+
+
+def _prompt_for_media_path(*, label: str, suffixes: set[str]) -> Path:
+    supported = ", ".join(sorted(suffixes))
+    while True:
+        raw_path = input(f"Enter {label} file path ({supported}): ").strip()
+        if raw_path.lower() in {"exit", "quit", ":q"}:
+            raise KeyboardInterrupt
+        if not raw_path:
+            print("Please enter a file path, or type 'exit' to stop.")
+            continue
+
+        try:
+            return _validate_existing_media_path(
+                Path(raw_path).expanduser(),
+                label=label,
+                suffixes=suffixes,
+            )
+        except ValueError as exc:
+            print(f"[ANSWER MODE] {exc}")
+
+
+def _choose_answer_mode(configured_mode: str) -> str:
+    if configured_mode != "ask":
+        return configured_mode.replace("-", "_")
+
+    if not sys.stdin.isatty():
+        return "text"
+
+    print("\nChoose answer mode:")
+    print("  1. Text")
+    print("  2. Audio file")
+    print("  3. Video file")
+    print("  4. Record audio")
+    print("  5. Record video")
+
+    choices = {
+        "1": "text",
+        "text": "text",
+        "t": "text",
+        "2": "audio",
+        "audio": "audio",
+        "audio file": "audio",
+        "a": "audio",
+        "3": "video",
+        "video": "video",
+        "video file": "video",
+        "v": "video",
+        "4": "record_audio",
+        "record audio": "record_audio",
+        "record-audio": "record_audio",
+        "record_audio": "record_audio",
+        "ra": "record_audio",
+        "5": "record_video",
+        "record video": "record_video",
+        "record-video": "record_video",
+        "record_video": "record_video",
+        "rv": "record_video",
+    }
+
+    while True:
+        raw_choice = input("Choose 1, 2, 3, 4, or 5: ").strip().lower()
+        if not raw_choice:
+            print(
+                "Please choose 1 for text, 2 for audio, 3 for video, "
+                "4 for record audio, or 5 for record video."
+            )
+            continue
+        mode = choices.get(raw_choice)
+        if mode:
+            return mode
+        print(
+            "Invalid choice. Please choose 1 for text, 2 for audio, "
+            "3 for video, 4 for record audio, or 5 for record video."
+        )
+
+
+def _prompt_recording_duration(default_seconds: int) -> int:
+    if not sys.stdin.isatty():
+        return default_seconds
+
+    while True:
+        raw_duration = input(
+            f"Enter recording duration in seconds [{default_seconds}]: "
+        ).strip()
+        if not raw_duration:
+            return default_seconds
+        if raw_duration.lower() in {"cancel", "exit", "quit", ":q"}:
+            raise RuntimeError("Recording cancelled.")
+        if raw_duration.isdigit() and int(raw_duration) > 0:
+            return int(raw_duration)
+        print("Please enter a positive whole number of seconds, or press Enter.")
+
+
+def _media_dependency_help(exc: Exception) -> str:
+    message = str(exc)
+    missing_name = getattr(exc, "name", "")
+    if isinstance(exc, ModuleNotFoundError) and missing_name:
+        message = f"Missing Python module: {missing_name}"
+
+    return (
+        f"{message}\n"
+        "Install the media dependencies, then try again:\n"
+        "./.venv/bin/python -m pip install -r requirements.txt"
+    )
+
+
+def _transcribe_media_answer(
+    media_path: Path,
+    *,
+    model: str,
+    language: str,
+) -> tuple[str, dict[str, Any]]:
+    from app.speech_analysis import build_delivery_metrics, has_audio_stream
+    from app.transcription import VideoTranscriber
+
+    try:
+        has_audio = has_audio_stream(str(media_path))
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise RuntimeError(_media_dependency_help(exc)) from exc
+
+    if not has_audio:
+        raise RuntimeError(f"No audio track found in {media_path}.")
+
+    print(f"[ANSWER MODE] Transcribing {media_path} with model '{model}' ...")
+    try:
+        transcriber = VideoTranscriber(model_size=model)
+        result = transcriber.transcribe(str(media_path), language=language)
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise RuntimeError(_media_dependency_help(exc)) from exc
+
+    transcript_payload = result.to_dict()
+    transcript_payload.update(_analyze_speech(result, media_path))
+    answer_text = result.text.strip()
+    if not answer_text:
+        raise RuntimeError("Transcription completed, but no answer text was detected.")
+
+    return answer_text, build_delivery_metrics(transcript_payload)
+
+
+def _compact_video_metrics(video_result: dict[str, Any]) -> dict[str, Any]:
+    video_metrics: dict[str, Any] = {}
+
+    presentation = video_result.get("video_presentation")
+    if isinstance(presentation, dict):
+        video_metrics["face"] = {
+            key: presentation[key]
+            for key in (
+                "face_visible_ratio",
+                "camera_facing_ratio",
+                "candidate_centered_ratio",
+                "head_movement_amount",
+                "happy_frame_ratio",
+                "happy_score_mean",
+                "smile_frequency",
+                "emotion_analysis_available",
+            )
+            if presentation.get(key) is not None
+        }
+
+    quality = video_result.get("video_quality")
+    if isinstance(quality, dict):
+        video_metrics["video_quality"] = {
+            key: quality[key]
+            for key in (
+                "brightness_mean",
+                "blur_score_mean",
+                "resolution",
+                "fps",
+                "multiple_faces_detected",
+            )
+            if quality.get(key) is not None
+        }
+
+    warnings = video_result.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        video_metrics["warnings"] = warnings
+
+    return clean_empty_fields(video_metrics)
+
+
+def _format_percent(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return "n/a"
+    return f"{float(value) * 100:.1f}%"
+
+
+def _video_warning_note(warning: str) -> str:
+    notes = {
+        "no_frames_sampled": "No frames could be sampled from this video.",
+        "no_face_detected": "No face was detected in sampled frames.",
+        "low_face_visibility": "Face was not visible in enough sampled frames.",
+        "low_brightness": "Low light may affect presentation quality.",
+        "blurry_video": "Blur may affect video presentation quality.",
+        "multiple_faces_detected": "Multiple faces appeared in sampled frames.",
+        "emotion_analysis_unavailable": "Emotion/happy analysis was unavailable.",
+        "emotion_analysis_may_be_unreliable": "Emotion/happy analysis may be unreliable for this video.",
+        "camera_facing_ratio_is_approximate_not_eye_contact": (
+            "Camera-facing ratio is approximate and does not measure real eye contact."
+        ),
+    }
+    return notes.get(warning, warning.replace("_", " ").capitalize() + ".")
+
+
+def _print_video_feedback(video_result: dict[str, Any]) -> None:
+    """Print compact, observable video feedback for interview practice."""
+    presentation = video_result.get("video_presentation")
+    if not isinstance(presentation, dict):
+        presentation = {}
+
+    quality = video_result.get("video_quality")
+    if not isinstance(quality, dict):
+        quality = {}
+
+    warnings = video_result.get("warnings")
+    warning_values = [str(item) for item in warnings] if isinstance(warnings, list) else []
+    warning_set = set(warning_values)
+    head_movement = presentation.get("head_movement_amount")
+    if not isinstance(head_movement, dict):
+        head_movement = {}
+
+    brightness_status = "low" if "low_brightness" in warning_set else "ok"
+    blur_status = "blurry" if "blurry_video" in warning_set else "ok"
+    multiple_faces = "yes" if quality.get("multiple_faces_detected") else "no"
+    camera_available = (
+        "yes" if presentation.get("camera_facing_ratio") is not None else "no"
+    )
+
+    print(
+        "[VIDEO] "
+        f"face visible {_format_percent(presentation.get('face_visible_ratio'))} | "
+        f"centered {_format_percent(presentation.get('candidate_centered_ratio'))} | "
+        f"brightness {brightness_status} | "
+        f"blur {blur_status} | "
+        f"head movement {head_movement.get('label', 'n/a')} | "
+        f"multiple faces {multiple_faces}"
+    )
+    print(
+        "[VIDEO] "
+        f"emotion/happy {_format_percent(presentation.get('happy_frame_ratio'))} | "
+        f"camera-facing available: {camera_available}"
+    )
+
+    centered_ratio = presentation.get("candidate_centered_ratio")
+    if isinstance(centered_ratio, (int, float)) and centered_ratio < 0.70:
+        print("[VIDEO] note: Candidate was off-center in many sampled frames.")
+
+    happy_ratio = presentation.get("happy_frame_ratio")
+    if isinstance(happy_ratio, (int, float)) and happy_ratio < 0.05:
+        print(
+            "[VIDEO] note: Happy-expression signal was low; treat this as optional presentation context only."
+        )
+
+    if head_movement.get("label") == "high":
+        print("[VIDEO] note: Head movement was high across sampled frames.")
+
+    for warning in warning_values:
+        if warning == "camera_facing_ratio_is_approximate_not_eye_contact":
+            continue
+        print(f"[VIDEO] note: {_video_warning_note(warning)}")
+
+
+def process_audio_answer(
+    audio_path: Path,
+    *,
+    model: str,
+    language: str,
+) -> tuple[str, dict[str, Any]]:
+    """Transcribe an audio/video file and build speech delivery metrics."""
+    return _transcribe_media_answer(
+        audio_path,
+        model=model,
+        language=language,
+    )
+
+
+def process_video_answer(
+    video_path: Path,
+    *,
+    model: str,
+    language: str,
+    sample_every_n: int,
+) -> tuple[str, dict[str, Any]]:
+    """Analyze video, then transcribe its audio for the answer text."""
+    from app.video_analysis import VideoAnalysisConfig, VideoAnalyzer
+
+    print(f"[ANSWER MODE] Analyzing video presentation metrics from {video_path} ...")
+    video_result = VideoAnalyzer(
+        VideoAnalysisConfig(sample_every_n=sample_every_n)
+    ).analyze(str(video_path))
+    video_result_payload = video_result.to_dict()
+    _print_video_feedback(video_result_payload)
+
+    answer_text, delivery_metrics = _transcribe_media_answer(
+        video_path,
+        model=model,
+        language=language,
+    )
+    delivery_metrics.update(_compact_video_metrics(video_result_payload))
+    return answer_text, clean_empty_fields(delivery_metrics)
+
+
+def _collect_text_answer() -> str:
+    answer = ""
+    while not answer:
+        answer = input("\n[USER ANSWER] ").strip()
+        if answer.lower() in {"exit", "quit", ":q"}:
+            raise KeyboardInterrupt
+        if not answer:
+            print("Please enter an answer, or type 'exit' to stop.")
+    return answer
+
+
+def _delete_recording_if_temporary(path: Path, *, keep_recordings: bool) -> None:
+    if keep_recordings:
+        return
+
+    try:
+        path.unlink(missing_ok=True)
+        print(f"[RECORD] Deleted temporary recording {path}")
+    except OSError as exc:
+        print(f"[RECORD] Warning: could not delete temporary recording: {exc}")
+
+
+def _collect_answer_payload(
+    args: argparse.Namespace,
+    *,
+    recordings_dir: Path,
+) -> dict[str, Any]:
+    """Collect one answer in text/audio/video mode for the existing graph."""
+    mode = _choose_answer_mode(args.answer_mode)
+
+    if mode == "text":
+        return {
+            "answer": _collect_text_answer(),
+            "answer_source": "text",
+        }
+
+    if mode == "audio":
+        audio_path = _prompt_for_media_path(
+            label="audio",
+            suffixes=MEDIA_SUFFIXES,
+        )
+        answer_text, delivery_metrics = process_audio_answer(
+            audio_path,
+            model=args.transcription_model,
+            language=args.transcription_language,
+        )
+        print(f"[ANSWER MODE] Transcript: {answer_text}")
+        return {
+            "answer": answer_text,
+            "answer_source": "audio_file",
+            "delivery_metrics": delivery_metrics,
+        }
+
+    if mode == "video":
+        video_path = _prompt_for_media_path(
+            label="video",
+            suffixes=VIDEO_SUFFIXES,
+        )
+        answer_text, delivery_metrics = process_video_answer(
+            video_path,
+            model=args.transcription_model,
+            language=args.transcription_language,
+            sample_every_n=args.video_sample_every_n,
+        )
+        print(f"[ANSWER MODE] Transcript: {answer_text}")
+        return {
+            "answer": answer_text,
+            "answer_source": "video_file",
+            "delivery_metrics": delivery_metrics,
+        }
+
+    if mode == "record_audio":
+        from app.media_recording import record_audio_answer
+
+        duration = _prompt_recording_duration(args.record_seconds)
+        recording_path = record_audio_answer(
+            output_dir=recordings_dir,
+            duration_seconds=duration,
+            sample_rate=args.record_sample_rate,
+        )
+        print(f"[RECORD] Saved audio to {recording_path}")
+        try:
+            answer_text, delivery_metrics = process_audio_answer(
+                recording_path,
+                model=args.transcription_model,
+                language=args.transcription_language,
+            )
+        finally:
+            _delete_recording_if_temporary(
+                recording_path,
+                keep_recordings=args.keep_recordings,
+            )
+        print(f"[ANSWER MODE] Transcript: {answer_text}")
+        return {
+            "answer": answer_text,
+            "answer_source": "record_audio",
+            "delivery_metrics": delivery_metrics,
+        }
+
+    if mode == "record_video":
+        from app.media_recording import record_video_answer
+
+        duration = _prompt_recording_duration(args.record_seconds)
+        recording_path = record_video_answer(
+            output_dir=recordings_dir,
+            duration_seconds=duration,
+            camera_device=args.camera_device,
+            audio_device=args.audio_device,
+        )
+        print(f"[RECORD] Saved video to {recording_path}")
+        try:
+            answer_text, delivery_metrics = process_video_answer(
+                recording_path,
+                model=args.transcription_model,
+                language=args.transcription_language,
+                sample_every_n=args.video_sample_every_n,
+            )
+        finally:
+            _delete_recording_if_temporary(
+                recording_path,
+                keep_recordings=args.keep_recordings,
+            )
+        print(f"[ANSWER MODE] Transcript: {answer_text}")
+        return {
+            "answer": answer_text,
+            "answer_source": "record_video",
+            "delivery_metrics": delivery_metrics,
+        }
+
+    raise ValueError(f"Unsupported answer mode: {mode}")
 
 
 def _load_job_payload(path: Path) -> dict[str, Any]:
@@ -411,6 +864,7 @@ def _render_report_markdown(report_payload: dict[str, Any]) -> str:
 def _save_interview_outputs(
     *,
     output_dir: Path,
+    run_name: str,
     thread_id: str,
     started_at: datetime,
     runtime_seconds: float,
@@ -421,7 +875,6 @@ def _save_interview_outputs(
     error: str | None = None,
 ) -> tuple[Path, Path, Path]:
     llm_calls = llm_client.get_call_trace()
-    run_name = f"{started_at.strftime('%Y%m%d_%H%M%S')}_{thread_id[:8]}"
     run_dir = output_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -442,6 +895,7 @@ def _save_interview_outputs(
         "metadata": metadata,
         "workflow_trace": state.get("trace", []),
         "llm_calls": llm_calls,
+        "document_brief": state.get("document_brief", {}),
         "planned_questions": state.get("planned_questions", []),
         "turn_summaries": state.get("turn_summaries", []),
         "turns": state.get("turns", []),
@@ -491,6 +945,8 @@ def run_interview_cli(args: argparse.Namespace) -> None:
 
     thread_id = args.thread_id or str(uuid4())
     started_at = datetime.now().astimezone()
+    run_name = _interview_run_name(started_at, thread_id)
+    recordings_dir = args.output_dir / run_name / "recordings"
     started = time.perf_counter()
     state: dict[str, Any] = {}
     status = "completed"
@@ -525,20 +981,24 @@ def run_interview_cli(args: argparse.Namespace) -> None:
             print("\n[STATE] Current stage: ask_question")
             print(f"\n[QUESTION] {_question_text(question)}")
 
-            answer = ""
-            while not answer:
-                answer = input("\n[USER ANSWER] ").strip()
-                if answer.lower() in {"exit", "quit", ":q"}:
-                    status = "stopped_by_user"
-                    break
-                if not answer:
-                    print("Please enter an answer, or type 'exit' to stop.")
+            try:
+                answer_payload = _collect_answer_payload(
+                    args,
+                    recordings_dir=recordings_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 - answer mode should fall back.
+                print(f"[ANSWER MODE] {exc}")
+                print("[ANSWER MODE] Falling back to typed text answer.")
+                answer_payload = {
+                    "answer": _collect_text_answer(),
+                    "answer_source": "text_fallback",
+                }
 
             if status == "stopped_by_user":
                 break
 
             print("\n[STATE] Current stage: evaluate_answer")
-            state = resume_interview(thread_id=thread_id, answer=answer)
+            state = resume_interview(thread_id=thread_id, answer=answer_payload)
             _print_latest_turn_result(state)
 
         if state.get("final_report"):
@@ -560,6 +1020,7 @@ def run_interview_cli(args: argparse.Namespace) -> None:
         runtime_seconds = time.perf_counter() - started
         trace_path, report_json_path, report_md_path = _save_interview_outputs(
             output_dir=args.output_dir,
+            run_name=run_name,
             thread_id=thread_id,
             started_at=started_at,
             runtime_seconds=runtime_seconds,
@@ -839,6 +1300,68 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=INTERVIEW_RUNS_DIR,
         help="Folder where trace logs and reports will be saved.",
+    )
+    interview_parser.add_argument(
+        "--answer-mode",
+        choices=(
+            "ask",
+            "text",
+            "audio",
+            "video",
+            "record-audio",
+            "record-video",
+        ),
+        default="ask",
+        help="How to collect each answer. Default: ask before each answer.",
+    )
+    interview_parser.add_argument(
+        "--transcription-language",
+        default="en",
+        help="Spoken language for audio/video transcription. Default: en.",
+    )
+    interview_parser.add_argument(
+        "--transcription-model",
+        default="small.en",
+        help="faster-whisper model size for audio/video answers.",
+    )
+    interview_parser.add_argument(
+        "--video-sample-every-n",
+        type=int,
+        default=10,
+        help="Analyze every nth frame for video-file answer metrics.",
+    )
+    interview_parser.add_argument(
+        "--record-seconds",
+        type=int,
+        default=60,
+        help="Default recording duration in seconds for record modes.",
+    )
+    interview_parser.add_argument(
+        "--record-sample-rate",
+        type=int,
+        default=16000,
+        help="Microphone sample rate for record-audio mode.",
+    )
+    interview_parser.add_argument(
+        "--camera-device",
+        default=None,
+        help=(
+            "Optional macOS ffmpeg avfoundation camera device index/name "
+            "for record-video mode."
+        ),
+    )
+    interview_parser.add_argument(
+        "--audio-device",
+        default=None,
+        help=(
+            "Optional macOS ffmpeg avfoundation audio device index/name "
+            "for record-video mode."
+        ),
+    )
+    interview_parser.add_argument(
+        "--keep-recordings",
+        action="store_true",
+        help="Keep temporary recordings instead of deleting them after processing.",
     )
 
     parse_parser = subparsers.add_parser(
