@@ -11,6 +11,27 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+# Cap sampled frames so DeepFace emotion analysis stays fast enough for a web
+# request; quality/visibility ratios remain stable with this many samples.
+_WEB_MAX_ANALYZED_FRAMES = 40
+
+
+def analyze_video_presentation(media_path: str | Path) -> dict[str, Any] | None:
+    """Run face/presentation analysis on a video answer, best-effort.
+
+    Returns the ``video_presentation`` section of ``VideoAnalysisResult`` (the
+    same payload the CLI's ``--with-video`` evaluation uses), or ``None`` when
+    the analysis is unavailable or fails.
+    """
+    from app.video_analysis import VideoAnalysisConfig, VideoAnalyzer
+
+    try:
+        config = VideoAnalysisConfig(max_analyzed_frames=_WEB_MAX_ANALYZED_FRAMES)
+        result = VideoAnalyzer(config).analyze(video_path=str(media_path))
+        return result.to_dict().get("video_presentation")
+    except Exception:  # noqa: BLE001 - face metrics are optional
+        return None
+
 
 def transcribe_and_analyze(
     media_path: str | Path,
@@ -36,6 +57,7 @@ def transcribe_and_analyze(
         build_delivery_metrics,
         decode_audio_mono,
         has_audio_stream,
+        has_video_stream,
         write_wav_mono,
     )
     from app.transcription import VideoTranscriber
@@ -81,6 +103,15 @@ def transcribe_and_analyze(
         except Exception as exc:  # noqa: BLE001 - voice analysis is best-effort
             payload["voice"] = {"error": str(exc)}
 
-        payload["delivery_metrics"] = build_delivery_metrics(payload)
+        video_metrics = None
+        try:
+            if has_video_stream(media_path):
+                video_metrics = analyze_video_presentation(media_path)
+        except Exception:  # noqa: BLE001 - video probing is best-effort
+            video_metrics = None
+        if video_metrics:
+            payload["video_presentation"] = video_metrics
+
+        payload["delivery_metrics"] = build_delivery_metrics(payload, video_metrics)
 
     return payload

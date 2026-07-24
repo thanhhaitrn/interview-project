@@ -16,6 +16,17 @@ def has_audio_stream(path: str) -> bool:
         container.close()
 
 
+def has_video_stream(path: str) -> bool:
+    """Return True if ``path`` contains at least one decodable video stream."""
+    import av
+
+    container = av.open(str(path))
+    try:
+        return len(container.streams.video) > 0
+    finally:
+        container.close()
+
+
 def decode_audio_mono(
     path: str,
     target_sr: int = 16000,

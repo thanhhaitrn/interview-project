@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  font-family: "Inter", system-ui, sans-serif;
+  background: linear-gradient(180deg, #ffffff 0%, #e8f2ef 100%);
+  background-attachment: fixed;
+  min-height: 100vh;
+  color: #17191f;
+}
+
+@layer components {
+  .pill {
+    @apply inline-flex items-center rounded-full px-4 py-2 text-sm font-medium transition;
+  }
+  .card {
+    @apply rounded-4xl bg-white shadow-card;
+  }
+  .tag {
+    @apply inline-flex items-center gap-1 rounded-full bg-brand/10 px-3 py-1 text-sm text-brand-600;
+  }
+}

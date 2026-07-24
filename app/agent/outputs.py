@@ -209,15 +209,28 @@ class DeliveryAssessment(BaseModel):
 
     fluency_rating: str = Field(
         default="",
-        description="Overall delivery fluency, e.g. weak / fair / strong.",
+        description="Overall speaking fluency, e.g. weak / fair / strong.",
     )
     voice_steadiness: str = Field(
         default="",
         description="Vocal steadiness, e.g. steady / mildly_unstable / shaky.",
     )
+    body_language_rating: str = Field(
+        default="",
+        description=(
+            "On-camera presentation quality inferred from the video/face "
+            "metrics, e.g. weak / fair / strong. Leave empty when no video "
+            "presentation metrics were provided."
+        ),
+    )
     observations: list[str] = Field(
         default_factory=list,
-        description="Specific delivery observations grounded in the metrics.",
+        description=(
+            "Specific delivery observations grounded in the metrics — voice "
+            "(pace, pauses, fillers, steadiness) and, when a video block is "
+            "present, on-camera presentation (face visibility, centered "
+            "framing, head movement/steadiness, facial expression/smile)."
+        ),
     )
     impact_on_communication: str = Field(
         default="",

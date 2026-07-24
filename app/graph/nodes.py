@@ -705,11 +705,17 @@ def _next_action_with_limits(
     followup_count = int(state.get("current_followup_count") or 0)
     max_followups = int(state.get("max_followups_per_question") or 0)
     next_question_index = question_index + 1
+    planned_limit = _planned_question_limit(state)
 
     if action == "follow_up" and followup_count >= max_followups:
         action = "next_question"
 
-    if action == "next_question" and next_question_index >= _planned_question_limit(state):
+    # Honor the configured question count: don't let the model end the interview
+    # early while planned base questions still remain to be asked.
+    if action == "final_report" and next_question_index < planned_limit:
+        action = "next_question"
+
+    if action == "next_question" and next_question_index >= planned_limit:
         action = "final_report"
 
     return action

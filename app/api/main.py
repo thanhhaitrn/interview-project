@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.deps import ensure_dirs
-from app.api.routers import media, practice, profiles, resumes
+from app.api.routers import media, mock, practice, profiles, resumes
 
 
 @asynccontextmanager
@@ -51,4 +51,5 @@ def health() -> dict[str, str]:
 app.include_router(resumes.router)
 app.include_router(profiles.router)
 app.include_router(practice.router)
+app.include_router(mock.router)
 app.include_router(media.router)

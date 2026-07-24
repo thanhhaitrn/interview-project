@@ -34,6 +34,10 @@ _VIDEO_KEYS = (
     "face_visible_ratio",
     "camera_facing_ratio",
     "candidate_centered_ratio",
+    "head_movement_amount",
+    "smile_frequency",
+    "happy_frame_ratio",
+    "dominant_emotion_counts",
 )
 
 

@@ -14,12 +14,17 @@ runtime_uploads/
 data/interview_runs/
 data/profiles/
 data/practice_runs/
+data/mock_runs/
 data/uploads/
 db/*.db
 db/*.sqlite
 db/*.sqlite3
 
-src/
+# Personal resume uploads (keep only the generic resume1/resume2 samples).
+data/resumes/**/Thanh_Hai*
+
+# Python package source dir at the repo root (not the frontend's src/).
+/src/
 
 # frontend
 frontend/node_modules/

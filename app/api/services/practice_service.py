@@ -145,6 +145,102 @@ def generate_report(
     return result.model_dump(exclude_none=True)
 
 
+# --- Per-question coaching (strengths + what to improve, for each answer) ----
+
+
+class _TurnCoachingItem(BaseModel):
+    index: int = Field(..., description="0-based index of the answered question.")
+    strengths: list[str] = Field(
+        default_factory=list,
+        description="1-2 concise, specific things the answer did well ('you' voice).",
+    )
+    to_improve: list[str] = Field(
+        default_factory=list,
+        description="1-2 concrete, actionable things to improve ('you' voice).",
+    )
+
+
+class _TurnCoachingBundle(BaseModel):
+    turns: list[_TurnCoachingItem] = Field(default_factory=list)
+
+
+_TURN_COACHING_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a supportive but honest interview coach. For EACH answered "
+            "question, write short, specific feedback addressed to the candidate "
+            "(use 'you'), grounded ONLY in their actual answer to that question — "
+            "do not invent evidence and do not mix in other questions.\n"
+            "For every question return: 1-2 concise strengths and 1-2 concrete, "
+            "actionable things to improve. Every question MUST have at least one "
+            "'to_improve'. If an answer is weak with no real strength, still find "
+            "the most credit-worthy aspect (e.g. named a relevant tool) or return "
+            "an empty strengths list — never fabricate. Keep each bullet to one "
+            "short sentence.\n\n"
+            "Respond with ONLY a single valid JSON object (no markdown), with key "
+            '"turns": an array of objects, each with exactly these keys:\n'
+            '  "index": integer (echo the question index given),\n'
+            '  "strengths": array of strings,\n'
+            '  "to_improve": array of strings.\n'
+            "Return one object per input question, using the same index.",
+        ),
+        (
+            "human",
+            "TARGET ROLE: {job} at {company}\n\n"
+            "ANSWERED QUESTIONS (index, question, the candidate's answer, and its "
+            "score where available):\n{turns_json}\n\n"
+            "Return the JSON object now.",
+        ),
+    ]
+)
+
+
+def generate_turn_coaching(
+    profile_record: dict[str, Any],
+    turns: list[dict[str, Any]],
+) -> list[dict[str, list[str]]]:
+    """Concise per-question strengths + improvements, aligned to ``turns`` order.
+
+    One batched LLM call so every answered question gets candidate-facing
+    feedback, even when the interview-time evaluation left the arrays sparse.
+    Returns a list the same length as ``turns``; each item is
+    ``{"strengths": [...], "to_improve": [...]}``.
+    """
+    if not turns:
+        return []
+
+    compact = [
+        {
+            "index": index,
+            "question": str(turn.get("question") or ""),
+            "answer": str(turn.get("answer") or ""),
+            "score": turn.get("overall_score"),
+        }
+        for index, turn in enumerate(turns)
+    ]
+    prompt = _TURN_COACHING_PROMPT.invoke(
+        {
+            "job": profile_record.get("job_title") or "the role",
+            "company": profile_record.get("company") or "the company",
+            "turns_json": json.dumps(compact, ensure_ascii=False, indent=2),
+        }
+    )
+    result = llm_client.call_llm_with_structured_output(prompt, _TurnCoachingBundle)
+    by_index = {item.index: item for item in result.turns}
+
+    coaching: list[dict[str, list[str]]] = []
+    for index in range(len(turns)):
+        item = by_index.get(index)
+        coaching.append(
+            {
+                "strengths": [s for s in (item.strengths if item else []) if s][:3],
+                "to_improve": [w for w in (item.to_improve if item else []) if w][:3],
+            }
+        )
+    return coaching
+
+
 # --- AI sample answer -------------------------------------------------------
 
 

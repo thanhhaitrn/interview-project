@@ -1,13 +1,14 @@
-"""Media endpoints: transcribe a recorded audio/video answer."""
+"""Media endpoints: transcribe + analyze a recorded audio/video answer."""
 
 from __future__ import annotations
 
-import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
+from app.api import deps
 from app.api.schemas_api import TranscribeResponse
 from app.api.services import media_service
 
@@ -42,25 +43,25 @@ async def transcribe(
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded recording is empty.")
 
-    suffix = _suffix_for(file)
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(data)
-            tmp_path = Path(tmp.name)
+    # Persist the recording like the CLI answer modes do, so it can be
+    # reviewed or re-analyzed later (data/uploads/ is git-ignored).
+    deps.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    media_path: Path = deps.UPLOADS_DIR / f"answer_{timestamp}{_suffix_for(file)}"
+    media_path.write_bytes(data)
 
+    try:
         result: dict[str, Any] = media_service.transcribe_and_analyze(
-            tmp_path, model_size=model_size, language=language
+            media_path, model_size=model_size, language=language
         )
     except Exception as exc:  # noqa: BLE001 - surface decode/transcribe errors
         raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}")
-    finally:
-        if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink()
 
     return TranscribeResponse(
         text=result.get("text", ""),
         fluency=result.get("fluency"),
         voice=result.get("voice"),
+        video_presentation=result.get("video_presentation"),
         delivery_metrics=result.get("delivery_metrics"),
+        recording_path=str(media_path),
     )

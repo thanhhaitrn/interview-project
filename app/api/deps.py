@@ -22,6 +22,7 @@ LLM_DIR = DATA_DIR / "resumes" / "llm"
 JOBS_DIR = DATA_DIR / "jobs"
 PROFILES_DIR = DATA_DIR / "profiles"
 PRACTICE_RUNS_DIR = DATA_DIR / "practice_runs"
+MOCK_RUNS_DIR = DATA_DIR / "mock_runs"
 UPLOADS_DIR = DATA_DIR / "uploads"
 
 LLM_SUFFIX = "_parsed_llm"
@@ -38,6 +39,7 @@ def ensure_dirs() -> None:
         JOBS_DIR,
         PROFILES_DIR,
         PRACTICE_RUNS_DIR,
+        MOCK_RUNS_DIR,
         UPLOADS_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)

@@ -84,6 +84,26 @@ class ReportRequest(BaseModel):
     turns: list[ReportTurn] = Field(default_factory=list)
 
 
+# --- Mock interview ---------------------------------------------------------
+
+
+class MockStartRequest(BaseModel):
+    profile_id: str
+    question_count: int | None = Field(default=None, ge=1, le=15)
+    difficulty: str | None = None
+    interviewer_role: str | None = None
+    interviewer_style: str | None = None
+    extra_notes: str | None = None
+    max_followups_per_question: int = Field(default=1, ge=0, le=3)
+
+
+class MockAnswerRequest(BaseModel):
+    thread_id: str
+    answer: str
+    answer_source: str = "text"
+    delivery_metrics: dict[str, Any] | None = None
+
+
 # --- Media ------------------------------------------------------------------
 
 
@@ -91,4 +111,6 @@ class TranscribeResponse(BaseModel):
     text: str
     fluency: dict[str, Any] | None = None
     voice: dict[str, Any] | None = None
+    video_presentation: dict[str, Any] | None = None
     delivery_metrics: dict[str, Any] | None = None
+    recording_path: str | None = None

@@ -3,6 +3,7 @@
 from app.speech_analysis.audio import (
     decode_audio_mono,
     has_audio_stream,
+    has_video_stream,
     write_wav_mono,
 )
 from app.speech_analysis.fluency import analyze_fluency
@@ -16,6 +17,7 @@ __all__ = [
     "build_delivery_metrics",
     "decode_audio_mono",
     "has_audio_stream",
+    "has_video_stream",
     "write_wav_mono",
     "FluencyMetrics",
     "VoiceMetrics",
