@@ -17,7 +17,8 @@ be read back later from the review history pages.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any
 from uuid import uuid4
@@ -541,3 +542,148 @@ def get_mock_run(profile_id: str, run_id: str) -> dict[str, Any]:
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Review not found: {run_id}")
     return deps.read_json(path)
+
+
+# --- Dashboard aggregation --------------------------------------------------
+
+
+def _iter_all_runs() -> list[dict[str, Any]]:
+    """Load every saved mock run across all profiles, oldest first."""
+    if not deps.MOCK_RUNS_DIR.exists():
+        return []
+
+    runs: list[dict[str, Any]] = []
+    for folder in deps.MOCK_RUNS_DIR.iterdir():
+        if not folder.is_dir():
+            continue
+        for path in folder.glob("*.json"):
+            try:
+                run = deps.read_json(path)
+            except (ValueError, OSError):
+                continue
+            run.setdefault("profile_id", folder.name)
+            runs.append(run)
+
+    runs.sort(key=lambda run: str(run.get("created_at") or run.get("run_id") or ""))
+    return runs
+
+
+def build_dashboard(
+    *,
+    profile_id: str | None = None,
+    days: int | None = None,
+) -> dict[str, Any]:
+    """Aggregate saved mock interviews into dashboard-ready series/totals.
+
+    ``profile_id`` restricts to one job profile; ``days`` restricts to
+    interviews within the last N days. The full profile list is always returned
+    (from the unfiltered set) so the UI's profile selector stays stable.
+    """
+    all_runs = _iter_all_runs()
+
+    # Selector options come from every run, independent of the active filter.
+    profile_labels: dict[str, str] = {}
+    for run in all_runs:
+        pid = run.get("profile_id")
+        if pid and pid not in profile_labels:
+            profile_labels[str(pid)] = str(run.get("job_title") or pid)
+    profile_options = [
+        {"profile_id": pid, "label": label}
+        for pid, label in sorted(profile_labels.items(), key=lambda kv: kv[1].lower())
+    ]
+
+    runs = all_runs
+    if profile_id:
+        runs = [run for run in runs if str(run.get("profile_id")) == profile_id]
+    if days and days > 0:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        runs = [run for run in runs if str(run.get("created_at") or "") >= cutoff]
+
+    interviews: list[dict[str, Any]] = []
+    competency_scores: dict[str, list[float]] = defaultdict(list)
+    role_scores: dict[str, list[float]] = defaultdict(list)
+    readiness_counts: Counter[str] = Counter()
+    delivery_counts: dict[str, Counter[str]] = {
+        "body_language_rating": Counter(),
+        "fluency_rating": Counter(),
+        "voice_steadiness": Counter(),
+    }
+    recorded_answers = 0
+    total_questions = 0
+    all_scores: list[float] = []
+
+    for run in runs:
+        avg = run.get("average_score")
+        role = run.get("job_title") or run.get("profile_id") or "Unknown role"
+        report = run.get("report") if isinstance(run.get("report"), dict) else {}
+        readiness = report.get("readiness") or run.get("readiness")
+
+        interviews.append(
+            {
+                "run_id": run.get("run_id"),
+                "profile_id": run.get("profile_id"),
+                "job_title": run.get("job_title"),
+                "company": run.get("company"),
+                "interviewer_role": run.get("interviewer_role"),
+                "interviewer_style": run.get("interviewer_style"),
+                "created_at": run.get("created_at"),
+                "average_score": avg if isinstance(avg, (int, float)) else None,
+                "readiness": readiness,
+                "question_count": run.get("question_count"),
+            }
+        )
+        if isinstance(avg, (int, float)):
+            all_scores.append(float(avg))
+            role_scores[str(role)].append(float(avg))
+        if readiness:
+            readiness_counts[str(readiness)] += 1
+
+        for turn in run.get("turns", []):
+            if not isinstance(turn, dict):
+                continue
+            total_questions += 1
+            competency = turn.get("competency")
+            score = turn.get("overall_score")
+            if competency and isinstance(score, (int, float)):
+                competency_scores[str(competency)].append(float(score))
+            delivery = turn.get("delivery_assessment")
+            if isinstance(delivery, dict) and delivery:
+                recorded_answers += 1
+                for key, counter in delivery_counts.items():
+                    value = delivery.get(key)
+                    if value:
+                        counter[str(value)] += 1
+
+    competencies = sorted(
+        (
+            {"competency": name, "avg_score": round(mean(scores), 2), "count": len(scores)}
+            for name, scores in competency_scores.items()
+        ),
+        key=lambda item: item["avg_score"],
+        reverse=True,
+    )
+    by_role = sorted(
+        (
+            {"label": name, "avg_score": round(mean(scores), 2), "count": len(scores)}
+            for name, scores in role_scores.items()
+        ),
+        key=lambda item: item["avg_score"],
+        reverse=True,
+    )
+
+    return {
+        "totals": {
+            "interviews": len(runs),
+            "questions": total_questions,
+            "average_score": round(mean(all_scores), 2) if all_scores else None,
+            "latest_readiness": interviews[-1]["readiness"] if interviews else None,
+            "recorded_answers": recorded_answers,
+        },
+        "interviews": interviews,
+        "competencies": competencies,
+        "by_role": by_role,
+        "readiness_counts": dict(readiness_counts),
+        "delivery": {key: dict(counter) for key, counter in delivery_counts.items()},
+        "profiles": profile_options,
+        "filters": {"profile_id": profile_id, "days": days},
+    }

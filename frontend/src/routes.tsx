@@ -18,6 +18,7 @@ export const router = createBrowserRouter([
     element: <AppLayout />,
     children: [
       { index: true, element: <Home /> },
+      { path: "dashboard", element: <MockHistory /> },
       { path: "resume", element: <ResumeList /> },
       { path: "resume/:id/edit", element: <ResumeEdit /> },
       { path: "profiles", element: <Profiles /> },

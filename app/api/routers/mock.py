@@ -58,6 +58,12 @@ def answer(payload: MockAnswerRequest) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"Could not submit answer: {exc}")
 
 
+@router.get("/dashboard")
+def dashboard(profile_id: str | None = None, days: int | None = None) -> dict[str, Any]:
+    """Aggregated stats across saved mock interviews, optionally filtered."""
+    return mock_service.build_dashboard(profile_id=profile_id, days=days)
+
+
 @router.get("/history")
 def all_history() -> list[dict[str, Any]]:
     """Summaries of every saved mock interview, across all profiles."""

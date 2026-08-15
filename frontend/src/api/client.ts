@@ -1,6 +1,7 @@
 import type {
   Evaluation,
   GeneratedQuestions,
+  MockDashboard,
   MockReview,
   MockReviewSummary,
   MockSession,
@@ -110,6 +111,13 @@ export const api = {
     answer_source?: string;
     delivery_metrics?: Record<string, unknown> | null;
   }) => request<MockSession>("/mock/answer", json("POST", payload)),
+  mockDashboard: (params?: { profile_id?: string; days?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.profile_id) q.set("profile_id", params.profile_id);
+    if (params?.days) q.set("days", String(params.days));
+    const qs = q.toString();
+    return request<MockDashboard>(`/mock/dashboard${qs ? `?${qs}` : ""}`);
+  },
   allMockHistory: () => request<MockReviewSummary[]>("/mock/history"),
   mockHistory: (profileId: string) =>
     request<MockReviewSummary[]>(`/mock/history/${profileId}`),

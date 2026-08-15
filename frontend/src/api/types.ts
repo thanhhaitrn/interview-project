@@ -176,6 +176,53 @@ export interface MockReview extends MockReviewSummary {
   turns: MockReviewTurn[];
 }
 
+export interface DashboardInterview {
+  run_id: string;
+  profile_id: string;
+  job_title?: string | null;
+  company?: string | null;
+  interviewer_role?: string | null;
+  interviewer_style?: string | null;
+  created_at: string;
+  average_score?: number | null;
+  readiness?: string | null;
+  question_count?: number;
+}
+
+export interface CompetencyStat {
+  competency: string;
+  avg_score: number;
+  count: number;
+}
+
+export interface RoleStat {
+  label: string;
+  avg_score: number;
+  count: number;
+}
+
+export interface DashboardProfileOption {
+  profile_id: string;
+  label: string;
+}
+
+export interface MockDashboard {
+  totals: {
+    interviews: number;
+    questions: number;
+    average_score: number | null;
+    latest_readiness: string | null;
+    recorded_answers: number;
+  };
+  interviews: DashboardInterview[];
+  competencies: CompetencyStat[];
+  by_role: RoleStat[];
+  readiness_counts: Record<string, number>;
+  delivery: Record<string, Record<string, number>>;
+  profiles: DashboardProfileOption[];
+  filters: { profile_id: string | null; days: number | null };
+}
+
 export interface MockStartOptions {
   profile_id: string;
   question_count?: number;

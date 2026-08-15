@@ -87,6 +87,32 @@ export function PageHeader({
   );
 }
 
+export function Segmented<T extends string | number>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: { label: string; value: T }[];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="inline-flex rounded-full border border-navy/10 bg-white p-0.5">
+      {options.map((o) => (
+        <button
+          key={String(o.value)}
+          onClick={() => onChange(o.value)}
+          className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
+            value === o.value ? "bg-brand text-white" : "text-navy/60 hover:bg-navy/5"
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ErrorNote({ message }: { message: string }) {
   return (
     <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
